@@ -8,6 +8,7 @@ import { getStartupChecks, summarizeStartupChecks } from './startup';
 import { QUALITY_PRESETS, QUALITY_PRESET_ORDER, QualityPresetManager } from './core/qualityManager';
 import { gameEvents } from './core/eventBus';
 import { ChunkLoader } from './world/chunkLoader';
+import { WorkerPool } from './workers/workerPool';
 import { WaterRenderer } from './world/waterRenderer';
 import { ProvinceRenderer } from './world/provinceRenderer';
 import { CityRenderer } from './world/cityDatabase';
@@ -105,9 +106,13 @@ const fill = new THREE.DirectionalLight(0xb8c8e8, 0.3);
 fill.position.set(1500, 1500, 1200);
 scene.add(fill);
 
+// ── Worker Pool ─────────────────────────────────────────────────
+
+const workerPool = new WorkerPool(QUALITY_PRESETS[qualityManager.currentPreset].workers);
+
 // ── Chunk-based Terrain ─────────────────────────────────────────
 
-const chunkLoader = new ChunkLoader(scene, { loadRadius: 6, unloadRadius: 10 });
+const chunkLoader = new ChunkLoader(scene, { loadRadius: 6, unloadRadius: 10, workerPool });
 
 // ── Animated Water ──────────────────────────────────────────────
 
@@ -141,6 +146,18 @@ gameEvents.on('chunk_loaded', ({ cx, cy }) => {
   const chunkData = generateProceduralChunk(cx, cy);
   provinceRenderer.updateChunkProvinces(cx, cy, chunkData.provinces);
   treeRenderer.updateChunkTrees(cx, cy, chunkData.heights, chunkData.biomes);
+});
+
+// ── Keyboard Event Handlers ─────────────────────────────────────
+
+gameEvents.on('toggle_overlay', () => {
+  provinceRenderer.toggleVisible();
+});
+
+gameEvents.on('close_panel', () => {
+  gameEvents.emit('city_selected', null);
+  gameEvents.emit('agent_selected', null);
+  gameEvents.emit('province_selected', null);
 });
 
 // ── Interaction ─────────────────────────────────────────────────
@@ -250,6 +267,7 @@ function applyQualityPreset(preset: QualityPreset): void {
   water.setQuality(config.waterShader);
   provinceRenderer.setQuality(preset);
   treeRenderer.setMaxInstances(config.treeInstances);
+  workerPool.setPoolSize(config.workers);
 
   const statusNode = document.querySelector<HTMLDivElement>('#status');
   if (statusNode) {

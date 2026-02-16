@@ -62,6 +62,8 @@ export interface GameEventMap {
   quality_changed: QualityPreset;
   viewport_changed: ViewportRect;
   lod_changed: { cx: number; cy: number; lod: LODLevel };
+  toggle_overlay: void;
+  close_panel: void;
 }
 
 /** Singleton game event bus. */

@@ -18,7 +18,13 @@
 import { CHUNK_SIZE, FACE_SHADE } from '../config';
 import type { ChunkData, ChunkMeshData, LODLevel } from '../types';
 import { BiomeType } from '../types';
-import { biomeColorRGB, applyColorNoise } from '../core/biomeColors';
+import {
+  biomeColorRGB,
+  applyColorNoise,
+  applyEmpireBorderFog,
+  applyMapEdgeFade,
+  distToBarbarianInChunk,
+} from '../core/biomeColors';
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -175,6 +181,10 @@ function getBiome(biomes: Uint8Array, lx: number, lz: number): number {
   return biomes[lz * CHUNK_SIZE + lx] ?? 0;
 }
 
+function getProvince(provinces: Uint8Array, lx: number, lz: number): number {
+  return provinces[lz * CHUNK_SIZE + lx] ?? 0;
+}
+
 // ── Quad Emitter ───────────────────────────────────────────────────
 
 /** Current vertex count tracker -- reset per mesh build. */
@@ -199,6 +209,8 @@ function emitQuad(
   nx: number, ny: number, nz: number,
   shade: number,
   biome: number,
+  provinceId: number,
+  distToBorder: number,
 ): void {
   const base = vertexCount;
 
@@ -208,26 +220,38 @@ function emitQuad(
   const sg = bg * shade;
   const sb = bb * shade;
 
+  // Per-vertex: noise -> empire border fog -> map edge fade
+  // Empire border fog uses the source tile's province info (same for all verts).
+  // Map edge fade uses each vertex's world XZ position for per-vertex gradient.
+
   // Vertex 0
-  const [r0, g0, b0] = applyColorNoise(sr, sg, sb, x0, y0, z0);
+  let [r0, g0, b0] = applyColorNoise(sr, sg, sb, x0, y0, z0);
+  [r0, g0, b0] = applyEmpireBorderFog(r0, g0, b0, provinceId, distToBorder);
+  [r0, g0, b0] = applyMapEdgeFade(r0, g0, b0, x0, z0);
   scratchPositions.push3(x0, y0, z0);
   scratchNormals.push3(nx, ny, nz);
   scratchColors.push3(r0, g0, b0);
 
   // Vertex 1
-  const [r1, g1, b1] = applyColorNoise(sr, sg, sb, x1, y1, z1);
+  let [r1, g1, b1] = applyColorNoise(sr, sg, sb, x1, y1, z1);
+  [r1, g1, b1] = applyEmpireBorderFog(r1, g1, b1, provinceId, distToBorder);
+  [r1, g1, b1] = applyMapEdgeFade(r1, g1, b1, x1, z1);
   scratchPositions.push3(x1, y1, z1);
   scratchNormals.push3(nx, ny, nz);
   scratchColors.push3(r1, g1, b1);
 
   // Vertex 2
-  const [r2, g2, b2] = applyColorNoise(sr, sg, sb, x2, y2, z2);
+  let [r2, g2, b2] = applyColorNoise(sr, sg, sb, x2, y2, z2);
+  [r2, g2, b2] = applyEmpireBorderFog(r2, g2, b2, provinceId, distToBorder);
+  [r2, g2, b2] = applyMapEdgeFade(r2, g2, b2, x2, z2);
   scratchPositions.push3(x2, y2, z2);
   scratchNormals.push3(nx, ny, nz);
   scratchColors.push3(r2, g2, b2);
 
   // Vertex 3
-  const [r3, g3, b3] = applyColorNoise(sr, sg, sb, x3, y3, z3);
+  let [r3, g3, b3] = applyColorNoise(sr, sg, sb, x3, y3, z3);
+  [r3, g3, b3] = applyEmpireBorderFog(r3, g3, b3, provinceId, distToBorder);
+  [r3, g3, b3] = applyMapEdgeFade(r3, g3, b3, x3, z3);
   scratchPositions.push3(x3, y3, z3);
   scratchNormals.push3(nx, ny, nz);
   scratchColors.push3(r3, g3, b3);
@@ -253,6 +277,7 @@ function emitQuad(
 function mergeTopFaces(
   heights: Uint8Array,
   biomes: Uint8Array,
+  provinces: Uint8Array,
   step: number,
   gridSize: number,
   worldOffsetX: number,
@@ -324,6 +349,12 @@ function mergeTopFaces(
       const qw = w * step; // quad width in world units
       const qd = d * step; // quad depth in world units
 
+      // Province info from the origin tile of this merged quad
+      const lx = gx * step;
+      const lz = gz * step;
+      const pid = getProvince(provinces, lx, lz);
+      const dBorder = distToBarbarianInChunk(provinces, lx, lz);
+
       // Top face: Y-up, corners at height wy
       // v0=NW, v1=NE, v2=SE, v3=SW  (viewed from above, CCW)
       emitQuad(
@@ -334,6 +365,8 @@ function mergeTopFaces(
         nx, ny, nz,
         shade,
         biome,
+        pid,
+        dBorder,
       );
     }
   }
@@ -354,6 +387,7 @@ function mergeTopFaces(
 function mergeSideFaces(
   heights: Uint8Array,
   biomes: Uint8Array,
+  provinces: Uint8Array,
   step: number,
   gridSize: number,
   worldOffsetX: number,
@@ -361,28 +395,28 @@ function mergeSideFaces(
 ): void {
   // NORTH faces (+Z direction) -- face visible when neighbor at z+1 is lower
   mergeSideDirection(
-    heights, biomes, step, gridSize,
+    heights, biomes, provinces, step, gridSize,
     worldOffsetX, worldOffsetZ,
     FaceDir.NORTH, 0, 1,
   );
 
   // SOUTH faces (-Z direction) -- face visible when neighbor at z-1 is lower
   mergeSideDirection(
-    heights, biomes, step, gridSize,
+    heights, biomes, provinces, step, gridSize,
     worldOffsetX, worldOffsetZ,
     FaceDir.SOUTH, 0, -1,
   );
 
   // EAST faces (+X direction) -- face visible when neighbor at x+1 is lower
   mergeSideDirection(
-    heights, biomes, step, gridSize,
+    heights, biomes, provinces, step, gridSize,
     worldOffsetX, worldOffsetZ,
     FaceDir.EAST, 1, 0,
   );
 
   // WEST faces (-X direction) -- face visible when neighbor at x-1 is lower
   mergeSideDirection(
-    heights, biomes, step, gridSize,
+    heights, biomes, provinces, step, gridSize,
     worldOffsetX, worldOffsetZ,
     FaceDir.WEST, -1, 0,
   );
@@ -397,6 +431,7 @@ function mergeSideFaces(
 function mergeSideDirection(
   heights: Uint8Array,
   biomes: Uint8Array,
+  provinces: Uint8Array,
   step: number,
   gridSize: number,
   worldOffsetX: number,
@@ -468,7 +503,13 @@ function mergeSideDirection(
       const yBot = neighborH;
       const spanWorld = span * step;
 
-      emitSideQuad(face, wx, wz, yTop, yBot, step, spanWorld, nx, ny, nz, shade, biome);
+      // Province info from the origin tile
+      const plx = gx0 * step;
+      const plz = gz0 * step;
+      const pid = getProvince(provinces, plx, plz);
+      const dBorder = distToBarbarianInChunk(provinces, plx, plz);
+
+      emitSideQuad(face, wx, wz, yTop, yBot, step, spanWorld, nx, ny, nz, shade, biome, pid, dBorder);
 
       // Advance past merged span (loop will increment by 1)
       inner += span - 1;
@@ -490,6 +531,8 @@ function emitSideQuad(
   nx: number, ny: number, nz: number,
   shade: number,
   biome: number,
+  provinceId: number,
+  distToBorder: number,
 ): void {
   // Each face direction has specific corner positions to ensure outward-facing
   // CCW winding order.
@@ -504,7 +547,7 @@ function emitSideQuad(
         wx,             yTop, z,   // v1
         wx,             yBot, z,   // v2
         wx + spanWorld, yBot, z,   // v3
-        nx, ny, nz, shade, biome,
+        nx, ny, nz, shade, biome, provinceId, distToBorder,
       );
       break;
     }
@@ -517,7 +560,7 @@ function emitSideQuad(
         wx + spanWorld, yTop, z,   // v1
         wx + spanWorld, yBot, z,   // v2
         wx,             yBot, z,   // v3
-        nx, ny, nz, shade, biome,
+        nx, ny, nz, shade, biome, provinceId, distToBorder,
       );
       break;
     }
@@ -530,7 +573,7 @@ function emitSideQuad(
         x, yTop, wz + spanWorld,   // v1
         x, yBot, wz + spanWorld,   // v2
         x, yBot, wz,               // v3
-        nx, ny, nz, shade, biome,
+        nx, ny, nz, shade, biome, provinceId, distToBorder,
       );
       break;
     }
@@ -543,7 +586,7 @@ function emitSideQuad(
         x, yTop, wz,               // v1
         x, yBot, wz,               // v2
         x, yBot, wz + spanWorld,   // v3
-        nx, ny, nz, shade, biome,
+        nx, ny, nz, shade, biome, provinceId, distToBorder,
       );
       break;
     }
@@ -619,6 +662,15 @@ function buildLOD3(chunk: ChunkData): ChunkMeshData {
   const wy = avgHeight;
   const size = CHUNK_SIZE;
 
+  // Use the center tile's province for LOD3
+  const centerIdx = Math.floor(CHUNK_SIZE / 2) * CHUNK_SIZE + Math.floor(CHUNK_SIZE / 2);
+  const lod3Province = chunk.provinces[centerIdx] ?? 0;
+  const lod3Dist = distToBarbarianInChunk(
+    chunk.provinces,
+    Math.floor(CHUNK_SIZE / 2),
+    Math.floor(CHUNK_SIZE / 2),
+  );
+
   emitQuad(
     wx,        wy, wz,
     wx + size, wy, wz,
@@ -627,6 +679,8 @@ function buildLOD3(chunk: ChunkData): ChunkMeshData {
     nx, ny, nz,
     shade,
     dominantBiome,
+    lod3Province,
+    lod3Dist,
   );
 
   return {
@@ -649,6 +703,7 @@ function buildLOD3(chunk: ChunkData): ChunkMeshData {
 function mergeBottomFaces(
   heights: Uint8Array,
   biomes: Uint8Array,
+  provinces: Uint8Array,
   step: number,
   gridSize: number,
   worldOffsetX: number,
@@ -710,6 +765,12 @@ function mergeBottomFaces(
       const qw = w * step;
       const qd = d * step;
 
+      // Province info from the origin tile
+      const lx = gx * step;
+      const lz = gz * step;
+      const pid = getProvince(provinces, lx, lz);
+      const dBorder = distToBarbarianInChunk(provinces, lx, lz);
+
       // Bottom face at y=0, flipped winding from top
       emitQuad(
         wx,      0, wz + qd,   // v0 (SW)
@@ -719,6 +780,8 @@ function mergeBottomFaces(
         nx, ny, nz,
         shade,
         biome,
+        pid,
+        dBorder,
       );
     }
   }
@@ -757,21 +820,21 @@ export function greedyMeshChunk(chunk: ChunkData, lod: LODLevel): ChunkMeshData 
 
   // Phase 1: Greedy-merge top faces
   mergeTopFaces(
-    chunk.heights, chunk.biomes,
+    chunk.heights, chunk.biomes, chunk.provinces,
     step, gridSize,
     worldOffsetX, worldOffsetZ,
   );
 
   // Phase 2: Greedy-merge side faces (north, south, east, west)
   mergeSideFaces(
-    chunk.heights, chunk.biomes,
+    chunk.heights, chunk.biomes, chunk.provinces,
     step, gridSize,
     worldOffsetX, worldOffsetZ,
   );
 
   // Phase 3: Bottom faces (greedy-merged)
   mergeBottomFaces(
-    chunk.heights, chunk.biomes,
+    chunk.heights, chunk.biomes, chunk.provinces,
     step, gridSize,
     worldOffsetX, worldOffsetZ,
   );

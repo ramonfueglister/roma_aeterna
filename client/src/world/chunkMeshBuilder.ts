@@ -22,7 +22,13 @@
 
 import { CHUNK_SIZE, FACE_SHADE } from '../config';
 import type { ChunkData, ChunkMeshData, LODLevel } from '../types';
-import { biomeColorRGB, applyColorNoise } from '../core/biomeColors';
+import {
+  biomeColorRGB,
+  applyColorNoise,
+  applyEmpireBorderFog,
+  applyMapEdgeFade,
+  distToBarbarianInChunk,
+} from '../core/biomeColors';
 import { BiomeType } from '../types';
 
 // ── LOD step sizes ─────────────────────────────────────────────────
@@ -163,6 +169,10 @@ export function buildChunkMesh(chunk: ChunkData, lod: LODLevel): ChunkMeshData {
   const heightGrid = new Float32Array(gridTiles * gridTiles);
   const biomeGrid = new Uint8Array(gridTiles * gridTiles);
 
+  // World offset for this chunk (tiles)
+  const chunkWorldX = chunk.cx * CHUNK_SIZE;
+  const chunkWorldZ = chunk.cy * CHUNK_SIZE;
+
   for (let gy = 0; gy < gridTiles; gy++) {
     for (let gx = 0; gx < gridTiles; gx++) {
       const lx = gx * step;
@@ -184,7 +194,19 @@ export function buildChunkMesh(chunk: ChunkData, lod: LODLevel): ChunkMeshData {
       // Apply per-vertex noise using grid position for determinism
       const worldLx = gx * step;
       const worldLy = gy * step;
-      const [r, g, b] = applyColorNoise(baseR, baseG, baseB, worldLx, worldLy, h);
+      let [r, g, b] = applyColorNoise(baseR, baseG, baseB, worldLx, worldLy, h);
+
+      // Empire border fog: look up province from the origin tile
+      const localTileX = gx * step;
+      const localTileZ = gy * step;
+      const provinceId = chunk.provinces[localTileZ * CHUNK_SIZE + localTileX] ?? 0;
+      const dBorder = distToBarbarianInChunk(chunk.provinces, localTileX, localTileZ);
+      [r, g, b] = applyEmpireBorderFog(r, g, b, provinceId, dBorder);
+
+      // Map edge fade: compute world tile coordinates
+      const worldTileX = chunkWorldX + localTileX;
+      const worldTileZ = chunkWorldZ + localTileZ;
+      [r, g, b] = applyMapEdgeFade(r, g, b, worldTileX, worldTileZ);
 
       // Column corners in chunk-local space
       const x0 = gx * step;

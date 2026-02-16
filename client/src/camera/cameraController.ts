@@ -42,6 +42,12 @@ const TACTICAL_HEIGHT = 500;
 const PRESET_ANIMATION_DURATION = 1.5;
 const GRID_CHUNKS = MAP_SIZE / CHUNK_SIZE;
 
+// Keyboard zoom-level presets (keys 1-4)
+const ZOOM_LEVEL_STRATEGIC = 4000;
+const ZOOM_LEVEL_REGIONAL = 2000;
+const ZOOM_LEVEL_TACTICAL = 600;
+const ZOOM_LEVEL_DETAIL = 150;
+
 // ── Input State ─────────────────────────────────────────────────────
 
 interface InputState {
@@ -511,10 +517,34 @@ export class CameraController {
         this.input.rotateRight = true;
         break;
       case 'KeyR':
+      case 'Equal': // + key
         this.input.zoomIn = true;
         break;
       case 'KeyF':
+      case 'Minus': // - key
         this.input.zoomOut = true;
+        break;
+      case 'Space':
+        event.preventDefault();
+        this.jumpToCity(0, 0, DEFAULT_CAMERA_HEIGHT);
+        break;
+      case 'Digit1':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_STRATEGIC);
+        break;
+      case 'Digit2':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_REGIONAL);
+        break;
+      case 'Digit3':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_TACTICAL);
+        break;
+      case 'Digit4':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_DETAIL);
+        break;
+      case 'KeyP':
+        gameEvents.emit('toggle_overlay', undefined as void);
+        break;
+      case 'Escape':
+        gameEvents.emit('close_panel', undefined as void);
         break;
     }
   }
@@ -544,9 +574,11 @@ export class CameraController {
         this.input.rotateRight = false;
         break;
       case 'KeyR':
+      case 'Equal':
         this.input.zoomIn = false;
         break;
       case 'KeyF':
+      case 'Minus':
         this.input.zoomOut = false;
         break;
     }
