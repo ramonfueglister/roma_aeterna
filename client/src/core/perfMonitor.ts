@@ -3,7 +3,7 @@
  * Provides rolling averages and budget warnings.
  */
 
-import { FRAME_BUDGET_MS, JS_HEAP_BUDGET_MB } from '../config';
+import { CHUNK_LOAD_BUDGET, FRAME_BUDGET_MS, JS_HEAP_BUDGET_MB } from '../config';
 
 export interface PerfSnapshot {
   fps: number;
@@ -13,6 +13,7 @@ export interface PerfSnapshot {
   jsHeapMB: number;
   chunksLoaded: number;
   overBudget: boolean;
+  chunkLoadBudgetExceeded: boolean;
 }
 
 export class PerfMonitor {
@@ -62,7 +63,24 @@ export class PerfMonitor {
       jsHeapMB: Math.round(jsHeapMB),
       chunksLoaded: this.chunksLoaded,
       overBudget: this.currentFrameTime > FRAME_BUDGET_MS,
+      chunkLoadBudgetExceeded: this.chunksLoaded > CHUNK_LOAD_BUDGET,
     };
+  }
+
+  setChunkLoadCount(count: number): void {
+    this.chunksLoaded = Math.max(0, Math.round(count));
+  }
+
+  addChunkLoads(delta: number): void {
+    const safeDelta = Number.isFinite(delta) ? Math.round(delta) : 0;
+    if (safeDelta <= 0) return;
+    this.chunksLoaded += safeDelta;
+  }
+
+  removeChunkLoads(delta: number): void {
+    const safeDelta = Number.isFinite(delta) ? Math.round(delta) : 0;
+    if (safeDelta <= 0) return;
+    this.chunksLoaded = Math.max(0, this.chunksLoaded - safeDelta);
   }
 
   /** Check if JS heap is near budget. */

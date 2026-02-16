@@ -38,6 +38,17 @@ export interface ChunkCoord {
   cy: number;
 }
 
+export type ChunkKey = `${number},${number}`;
+
+export function makeChunkKey(cx: number, cy: number): ChunkKey {
+  return `${cx},${cy}`;
+}
+
+export function parseChunkKey(key: ChunkKey): ChunkCoord {
+  const [cxRaw, cyRaw] = key.split(',');
+  return { cx: Number(cxRaw), cy: Number(cyRaw) };
+}
+
 export interface ChunkData {
   cx: number;
   cy: number;
@@ -142,6 +153,7 @@ export enum AgentState {
   MOVING = 'moving',
   TRADING = 'trading',
   RESTING = 'resting',
+  LOADING = 'loading',
   PATROLLING = 'patrolling',
 }
 
@@ -182,6 +194,24 @@ export interface ProvinceData {
 
 export type QualityPreset = 'high' | 'medium' | 'low' | 'toaster';
 
+export interface QualityPresetConfig {
+  preset: QualityPreset;
+  label: string;
+  targetFps: number;
+  workers: number;
+  treeInstances: number;
+  cityCache: number;
+  lodDistanceScale: number;
+  waterShader: 'full' | 'normal' | 'flat';
+  ambientEffects: 'full' | 'reduced' | 'core';
+  ambientFxEmitters: number;
+  cloudLayers: number;
+  streetLifeCap: number;
+  harvestLoopCap: number;
+  labelCap: number;
+  contactShadows: 'screen-space' | 'blob';
+}
+
 // ── Events ──────────────────────────────────────────────────────
 
 export type GameEventType =
@@ -205,6 +235,25 @@ export interface GameEvent<T = unknown> {
 export type Result<T, E = Error> =
   | { ok: true; value: T }
   | { ok: false; error: E };
+
+export function ok<T, E = Error>(value: T): Result<T, E> {
+  return { ok: true, value };
+}
+
+export function err<T, E = Error>(error: E): Result<T, E> {
+  return { ok: false, error };
+}
+
+export function isOk<T, E>(result: Result<T, E>): result is { ok: true; value: T } {
+  return result.ok;
+}
+
+export function unwrap<T, E>(result: Result<T, E>): T {
+  if (isOk(result)) {
+    return result.value;
+  }
+  throw result.error;
+}
 
 // ── Worker Messages ─────────────────────────────────────────────
 
