@@ -1,0 +1,3 @@
+# Standard library-only pipeline scripts are sufficient for bootstrap usage.
+# Add heavy optional dependencies when enabling full GIS processing:
+# GDAL, geopandas, rasterio, numpy, shapely, requests, Pillow, supabase

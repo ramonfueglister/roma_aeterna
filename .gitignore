@@ -1,0 +1,118 @@
+# ============================================
+# Node.js / TypeScript (Client)
+# ============================================
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.vite/
+*.js.map
+
+# ============================================
+# Go (tools/chunks only)
+# ============================================
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+go.work
+go.work.sum
+vendor/
+
+# ============================================
+# Supabase
+# ============================================
+supabase/.temp/
+supabase/.branches/
+
+# ============================================
+# Python (Data Pipeline)
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+*.whl
+venv/
+.venv/
+env/
+.env.local
+
+# ============================================
+# Data (raw + processed, large files)
+# ============================================
+data/raw/
+data/processed/
+data/chunks/
+data/cities/
+data/provinces/
+data/rivers/
+data/roads/
+data/resources/
+data/trades/
+data/meta/
+*.tif
+*.tiff
+*.shp
+*.shx
+*.dbf
+*.prj
+*.geojson
+*.gpkg
+*.hgt
+
+# ============================================
+# Environment
+# ============================================
+.env
+
+# ============================================
+# Database
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================
+# IDE / Editor
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ============================================
+# OS
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================
+# Testing / Coverage
+# ============================================
+coverage/
+.playwright/
+test-results/
+playwright-report/
+
+# ============================================
+# Debug / Temp
+# ============================================
+debug
+__debug_bin*
+tmp/
+*.log
