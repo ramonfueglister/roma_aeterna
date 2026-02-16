@@ -268,6 +268,7 @@ export class ProvinceRenderer {
 
   private quality: QualityPreset = 'high';
   private needsTextureUpload = false;
+  private userVisible = true;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -391,8 +392,8 @@ export class ProvinceRenderer {
       uCameraHeight.value = cameraHeight;
     }
 
-    // Hide mesh entirely when below lowest threshold (performance)
-    this.mesh.visible = cameraHeight >= TACTICAL_HEIGHT - BLEND_RANGE;
+    // Hide mesh entirely when below lowest threshold (performance) or user-toggled off
+    this.mesh.visible = this.userVisible && cameraHeight >= TACTICAL_HEIGHT - BLEND_RANGE;
   }
 
   /**
@@ -414,6 +415,15 @@ export class ProvinceRenderer {
     }
 
     this.mesh.visible = settings.enabled;
+  }
+
+  /**
+   * Toggle user-controlled visibility of the province overlay.
+   * When hidden by the user, the overlay stays hidden regardless of camera height.
+   */
+  toggleVisible(): void {
+    this.userVisible = !this.userVisible;
+    this.mesh.visible = this.userVisible && this.mesh.visible;
   }
 
   /**

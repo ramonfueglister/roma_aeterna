@@ -1,12 +1,12 @@
 /**
  * Post-processing pipeline for Roma Aeterna.
  *
- * Chain: RenderPass -> UnrealBloomPass -> TiltShiftPass -> ColorGradingPass -> VignettePass
+ * Chain: RenderPass -> UnrealBloomPass -> TiltShiftPass -> ColorGradingPass -> ParchmentOverlayPass -> VignettePass
  *
  * Quality presets control which passes are active:
- *   high    - all effects
- *   medium  - bloom + vignette + color grading
- *   low     - vignette only
+ *   high    - all effects (parchment overlay activates above camera height 2000)
+ *   medium  - bloom + parchment overlay + color grading + vignette
+ *   low     - vignette only (no parchment)
  *   toaster - bypass composer entirely (direct renderer.render)
  */
 
@@ -220,6 +220,120 @@ const TiltShiftShader = {
   `,
 } as const;
 
+// ── Parchment Overlay Shader ─────────────────────────────────────
+
+const ParchmentOverlayShader = {
+  name: 'ParchmentOverlayShader',
+
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uCameraHeight: { value: 0.0 },
+    uResolution: { value: new THREE.Vector2(1, 1) },
+  },
+
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uCameraHeight;
+    uniform vec2 uResolution;
+
+    varying vec2 vUv;
+
+    // ---- Hash-based noise for procedural parchment ----
+
+    // Simple 2D hash returning a float in [0, 1]
+    float hash(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+
+    // Value noise with smooth interpolation
+    float valueNoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+
+      // Hermite interpolation for smooth blending
+      vec2 u = f * f * (3.0 - 2.0 * f);
+
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+
+    // Multi-octave fractal Brownian motion for paper grain
+    float fbm(vec2 p) {
+      float value = 0.0;
+      float amplitude = 0.5;
+      float frequency = 1.0;
+
+      // 4 octaves: coarse fiber + medium grain + fine grain + micro detail
+      for (int i = 0; i < 4; i++) {
+        value += amplitude * valueNoise(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+      }
+      return value;
+    }
+
+    // Generate parchment texture: warm paper with fiber-like grain
+    vec3 parchmentColor(vec2 uv) {
+      // Tile at 512px equivalent spacing (seamless in screen space)
+      vec2 noiseCoord = uv * uResolution / 512.0;
+
+      // Large-scale paper variation (fibers, aging)
+      float coarseGrain = fbm(noiseCoord * 8.0);
+
+      // Fine-scale grain (paper texture surface)
+      float fineGrain = fbm(noiseCoord * 24.0 + 7.31);
+
+      // Combine: mostly coarse structure with fine detail
+      float grain = mix(coarseGrain, fineGrain, 0.35);
+
+      // Warm parchment base tone: desaturated golden-brown
+      // Range: from dark aged spots (0.78, 0.72, 0.62) to light paper (0.95, 0.90, 0.82)
+      vec3 darkTone  = vec3(0.78, 0.72, 0.62);
+      vec3 lightTone = vec3(0.95, 0.90, 0.82);
+
+      return mix(darkTone, lightTone, grain);
+    }
+
+    void main() {
+      vec4 color = texture2D(tDiffuse, vUv);
+
+      // Opacity: 0.0 at height <= 2000, 0.15 at height >= 5000
+      // Smooth interpolation (smoothstep) between thresholds
+      float opacity = smoothstep(2000.0, 5000.0, uCameraHeight) * 0.15;
+
+      if (opacity < 0.001) {
+        // Below activation threshold - pass through unchanged
+        gl_FragColor = color;
+        return;
+      }
+
+      // Generate procedural parchment noise
+      vec3 parchment = parchmentColor(vUv);
+
+      // Multiply blend: scene * parchment, then mix by opacity
+      // Multiply blend darkens and tints, giving the antique map feel
+      vec3 blended = color.rgb * parchment;
+      color.rgb = mix(color.rgb, blended, opacity);
+
+      gl_FragColor = color;
+    }
+  `,
+} as const;
+
 // ── Uniform Type Helpers ─────────────────────────────────────────
 
 interface VignetteUniforms {
@@ -244,6 +358,12 @@ interface TiltShiftUniforms {
   blurAmount: THREE.IUniform<number>;
 }
 
+interface ParchmentOverlayUniforms {
+  tDiffuse: THREE.IUniform<THREE.Texture | null>;
+  uCameraHeight: THREE.IUniform<number>;
+  uResolution: THREE.IUniform<THREE.Vector2>;
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 export class PostProcessingPipeline {
@@ -257,6 +377,7 @@ export class PostProcessingPipeline {
   private readonly vignettePass: ShaderPass;
   private readonly colorGradingPass: ShaderPass;
   private readonly tiltShiftPass: ShaderPass;
+  private readonly parchmentOverlayPass: ShaderPass;
 
   private quality: QualityPreset = 'high';
   private bypassed = false;
@@ -296,6 +417,11 @@ export class PostProcessingPipeline {
     this.colorGradingPass = new ShaderPass(ColorGradingShader);
     this.composer.addPass(this.colorGradingPass);
 
+    // --- Parchment Overlay (antique map feel at strategic zoom) ---
+    this.parchmentOverlayPass = new ShaderPass(ParchmentOverlayShader);
+    this.parchmentOverlayUniforms.uResolution.value.copy(renderSize);
+    this.composer.addPass(this.parchmentOverlayPass);
+
     // --- Vignette (always last visual pass) ---
     this.vignettePass = new ShaderPass(VignetteShader);
     this.composer.addPass(this.vignettePass);
@@ -318,6 +444,10 @@ export class PostProcessingPipeline {
 
   private get tiltShiftUniforms(): TiltShiftUniforms {
     return this.tiltShiftPass.uniforms as unknown as TiltShiftUniforms;
+  }
+
+  private get parchmentOverlayUniforms(): ParchmentOverlayUniforms {
+    return this.parchmentOverlayPass.uniforms as unknown as ParchmentOverlayUniforms;
   }
 
   // ── Public API ───────────────────────────────────────────────
@@ -346,6 +476,9 @@ export class PostProcessingPipeline {
 
     // Update tilt-shift resolution uniform
     this.tiltShiftUniforms.resolution.value.set(width, height);
+
+    // Update parchment overlay resolution uniform
+    this.parchmentOverlayUniforms.uResolution.value.set(width, height);
   }
 
   /**
@@ -353,9 +486,9 @@ export class PostProcessingPipeline {
    * quality preset. This enables or disables passes by setting their
    * `enabled` flag, which is essentially free when disabled.
    *
-   *   high    - bloom + tilt-shift + color grading + vignette
-   *   medium  - bloom + color grading + vignette
-   *   low     - vignette only
+   *   high    - bloom + tilt-shift + color grading + parchment overlay + vignette
+   *   medium  - bloom + color grading + parchment overlay + vignette
+   *   low     - vignette only (no parchment)
    *   toaster - bypass composer entirely
    */
   setQuality(preset: QualityPreset): void {
@@ -367,6 +500,7 @@ export class PostProcessingPipeline {
         this.bloomPass.enabled = true;
         this.tiltShiftPass.enabled = true;
         this.colorGradingPass.enabled = true;
+        this.parchmentOverlayPass.enabled = true;
         this.vignettePass.enabled = true;
         break;
 
@@ -375,6 +509,7 @@ export class PostProcessingPipeline {
         this.bloomPass.enabled = true;
         this.tiltShiftPass.enabled = false;
         this.colorGradingPass.enabled = true;
+        this.parchmentOverlayPass.enabled = true;
         this.vignettePass.enabled = true;
         break;
 
@@ -383,6 +518,7 @@ export class PostProcessingPipeline {
         this.bloomPass.enabled = false;
         this.tiltShiftPass.enabled = false;
         this.colorGradingPass.enabled = false;
+        this.parchmentOverlayPass.enabled = false;
         this.vignettePass.enabled = true;
         break;
 
@@ -391,6 +527,7 @@ export class PostProcessingPipeline {
         this.bloomPass.enabled = false;
         this.tiltShiftPass.enabled = false;
         this.colorGradingPass.enabled = false;
+        this.parchmentOverlayPass.enabled = false;
         this.vignettePass.enabled = false;
         break;
     }
@@ -407,6 +544,7 @@ export class PostProcessingPipeline {
 
     // ShaderPass materials need manual disposal
     this.vignettePass.material.dispose();
+    this.parchmentOverlayPass.material.dispose();
     this.colorGradingPass.material.dispose();
     this.tiltShiftPass.material.dispose();
 
@@ -519,5 +657,25 @@ export class PostProcessingPipeline {
 
   get tiltShiftBlurAmount(): number {
     return this.tiltShiftUniforms.blurAmount.value;
+  }
+
+  // --- Parchment Overlay ---
+
+  /**
+   * Update the camera height for the parchment overlay effect.
+   * Call this each frame (or when the camera moves) so the shader
+   * knows how much parchment to blend in.
+   *
+   * - height <= 2000: no parchment effect (opacity 0)
+   * - height >= 5000: full parchment effect (opacity 0.15)
+   * - smooth interpolation between these thresholds
+   */
+  updateCameraHeight(height: number): void {
+    this.parchmentOverlayUniforms.uCameraHeight.value = height;
+  }
+
+  /** Current camera height value driving the parchment overlay */
+  get parchmentCameraHeight(): number {
+    return this.parchmentOverlayUniforms.uCameraHeight.value;
   }
 }

@@ -30,11 +30,11 @@ describe('biomeColorRGB', () => {
     expect(b).toBeLessThanOrEqual(1);
   });
 
-  it('correctly decomposes WATER_DEEP (0x1a3a5c)', () => {
+  it('correctly decomposes WATER_DEEP (0x14326e) per Spec Section 11', () => {
     const [r, g, b] = biomeColorRGB(BiomeType.WATER_DEEP);
-    expect(r).toBeCloseTo(0x1a / 255, 2);
-    expect(g).toBeCloseTo(0x3a / 255, 2);
-    expect(b).toBeCloseTo(0x5c / 255, 2);
+    expect(r).toBeCloseTo(0x14 / 255, 2);
+    expect(g).toBeCloseTo(0x32 / 255, 2);
+    expect(b).toBeCloseTo(0x6e / 255, 2);
   });
 });
 

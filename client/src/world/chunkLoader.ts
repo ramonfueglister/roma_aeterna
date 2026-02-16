@@ -2,8 +2,9 @@
  * ChunkLoader: manages loading, caching, and lifecycle of terrain chunks.
  *
  * Decides which chunks to load/unload based on camera position using
- * spiral outward ordering. Meshes are created from ChunkMeshData produced
- * either by a WorkerPool (when available) or a synchronous fallback.
+ * spiral outward ordering. Mesh generation is offloaded to a WorkerPool
+ * (Web Workers) for non-blocking operation. A synchronous fallback via
+ * buildChunkMesh is used only when the WorkerPool is unavailable.
  *
  * Chunk world-space positioning:
  *   Chunk (0,0) starts at world x = -MAP_SIZE/2, z = -MAP_SIZE/2.
@@ -19,6 +20,7 @@ import { gameEvents } from '../core/eventBus';
 import { createLogger } from '../core/logger';
 import { generateProceduralChunk } from './proceduralChunk';
 import { buildChunkMesh } from './chunkMeshBuilder';
+import { WorkerPool } from '../workers/workerPool';
 
 const log = createLogger('ChunkLoader');
 
@@ -88,11 +90,21 @@ export class ChunkLoader {
    */
   chunkDataProvider: ChunkDataProvider;
 
+  /** Worker pool for off-thread mesh generation. */
+  private workerPool: WorkerPool | null;
+
   /** Last camera chunk position; skip work when the camera hasn't moved to a new chunk. */
   private lastCameraCx = -9999;
   private lastCameraCy = -9999;
 
-  constructor(scene: THREE.Scene, options?: { loadRadius?: number; unloadRadius?: number }) {
+  constructor(
+    scene: THREE.Scene,
+    options?: {
+      loadRadius?: number;
+      unloadRadius?: number;
+      workerPool?: WorkerPool;
+    },
+  ) {
     this.terrainGroup = new THREE.Group();
     this.terrainGroup.name = 'terrain';
     scene.add(this.terrainGroup);
@@ -100,12 +112,20 @@ export class ChunkLoader {
     this.loadRadius = options?.loadRadius ?? 8;
     this.unloadRadius = options?.unloadRadius ?? 12;
 
+    // Accept an external WorkerPool or create a default one.
+    // The pool can be shared across multiple subsystems if needed.
+    this.workerPool = options?.workerPool ?? null;
+
     // Default to procedural generation
     this.chunkDataProvider = generateProceduralChunk;
 
+    const workerInfo = this.workerPool
+      ? `workerPool=${this.workerPool.workerCount} workers`
+      : 'sync fallback (no WorkerPool)';
+
     log.info(
       `Initialised: loadRadius=${this.loadRadius}, unloadRadius=${this.unloadRadius}, ` +
-        `gridSize=${GRID_SIZE}x${GRID_SIZE}`,
+        `gridSize=${GRID_SIZE}x${GRID_SIZE}, ${workerInfo}`,
     );
   }
 
@@ -146,6 +166,16 @@ export class ChunkLoader {
   /** Number of chunks currently being built. */
   get pendingCount(): number {
     return this.pendingLoads.size;
+  }
+
+  /** Replace the worker pool (e.g. after quality preset change). */
+  setWorkerPool(pool: WorkerPool | null): void {
+    this.workerPool = pool;
+    log.info(
+      pool
+        ? `WorkerPool set: ${pool.workerCount} workers`
+        : 'WorkerPool removed, using sync fallback',
+    );
   }
 
   /** Clean up all resources. */
@@ -189,9 +219,11 @@ export class ChunkLoader {
   }
 
   /**
-   * Load a single chunk: get data, build mesh, add to scene.
-   * Currently synchronous (main-thread mesh build).
-   * TODO: Route through WorkerPool when it is implemented.
+   * Load a single chunk: get data, build mesh off-thread, add to scene.
+   *
+   * Uses the WorkerPool for async mesh generation when available.
+   * Falls back to synchronous buildChunkMesh on the main thread if
+   * no worker pool is set (e.g. during tests or if workers fail to load).
    */
   private loadChunk(cx: number, cy: number, lod: LODLevel): void {
     const key = makeChunkKey(cx, cy);
@@ -203,13 +235,71 @@ export class ChunkLoader {
       return;
     }
 
-    // Build mesh data (synchronous fallback until WorkerPool exists)
-    const meshData = buildChunkMesh(chunkData, lod);
-    const mesh = this.createMeshFromData(meshData, cx, cy);
+    if (this.workerPool) {
+      // Async path: offload mesh generation to a Web Worker
+      this.workerPool.requestMesh(chunkData, lod).then(
+        (meshData) => {
+          this.onMeshReady(key, cx, cy, lod, meshData);
+        },
+        (error) => {
+          this.pendingLoads.delete(key);
+          log.warn(
+            `Worker mesh generation failed for (${cx},${cy}) LOD${lod}, ` +
+            `falling back to sync: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          // Fallback: build synchronously on main thread
+          this.loadChunkSync(key, cx, cy, lod, chunkData);
+        },
+      );
+    } else {
+      // Sync fallback: build on main thread
+      this.loadChunkSync(key, cx, cy, lod, chunkData);
+    }
+  }
 
+  /**
+   * Synchronous mesh build fallback. Used when WorkerPool is unavailable
+   * or when a worker request fails.
+   */
+  private loadChunkSync(
+    key: ChunkKey,
+    cx: number,
+    cy: number,
+    lod: LODLevel,
+    chunkData: ChunkData,
+  ): void {
+    const meshData = buildChunkMesh(chunkData, lod);
+    this.onMeshReady(key, cx, cy, lod, meshData);
+  }
+
+  /**
+   * Handle completed mesh data (from either worker or sync fallback).
+   *
+   * Guards against stale results: if the chunk was unloaded while
+   * the worker was busy (camera moved away), the result is discarded.
+   */
+  private onMeshReady(
+    key: ChunkKey,
+    cx: number,
+    cy: number,
+    lod: LODLevel,
+    meshData: ChunkMeshData,
+  ): void {
+    // Discard if no longer pending (chunk was unloaded while building)
+    if (!this.pendingLoads.has(key)) {
+      return;
+    }
+
+    this.pendingLoads.delete(key);
+
+    // Discard if chunk was already loaded by another path (race condition)
+    if (this.loadedChunks.has(key)) {
+      return;
+    }
+
+    const mesh = this.createMeshFromData(meshData, cx, cy);
     this.loadedChunks.set(key, { mesh, lod });
     this.terrainGroup.add(mesh);
-    this.pendingLoads.delete(key);
 
     gameEvents.emit('chunk_loaded', { cx, cy });
   }
@@ -240,6 +330,8 @@ export class ChunkLoader {
 
   /**
    * Remove a single chunk: dispose GPU resources, remove from scene and map.
+   * Also cancels any pending load for this chunk key so that in-flight
+   * worker results are discarded in onMeshReady.
    */
   private unloadChunk(key: ChunkKey): void {
     const entry = this.loadedChunks.get(key);
@@ -248,6 +340,10 @@ export class ChunkLoader {
     const coords = parseKeyFast(key);
     this.disposeEntry(entry);
     this.loadedChunks.delete(key);
+
+    // If the chunk is still pending (async build in flight), mark it
+    // as no longer wanted so onMeshReady discards the result.
+    this.pendingLoads.delete(key);
 
     gameEvents.emit('chunk_unloaded', { cx: coords.cx, cy: coords.cy });
   }
@@ -267,21 +363,81 @@ export class ChunkLoader {
       const desiredLod = this.getLOD(dist);
 
       if (desiredLod !== entry.lod) {
-        // Rebuild at new LOD
+        // Skip if already rebuilding this chunk
+        if (this.pendingLoads.has(key)) continue;
+
         const chunkData = this.chunkDataProvider(coords.cx, coords.cy);
         if (!chunkData) continue;
 
-        const meshData = buildChunkMesh(chunkData, desiredLod);
-        const newMesh = this.createMeshFromData(meshData, coords.cx, coords.cy);
+        if (this.workerPool) {
+          // Async LOD rebuild via worker
+          this.pendingLoads.add(key);
+          this.workerPool.requestMesh(chunkData, desiredLod).then(
+            (meshData) => {
+              this.onLodMeshReady(key, coords.cx, coords.cy, desiredLod, meshData);
+            },
+            (error) => {
+              this.pendingLoads.delete(key);
+              log.warn(
+                `Worker LOD rebuild failed for (${coords.cx},${coords.cy}), ` +
+                `falling back to sync: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              // Sync fallback for LOD rebuild
+              const syncMeshData = buildChunkMesh(chunkData, desiredLod);
+              this.onLodMeshReady(key, coords.cx, coords.cy, desiredLod, syncMeshData);
+            },
+          );
+        } else {
+          // Sync LOD rebuild
+          const meshData = buildChunkMesh(chunkData, desiredLod);
+          const newMesh = this.createMeshFromData(meshData, coords.cx, coords.cy);
 
-        this.disposeEntry(entry);
-        entry.mesh = newMesh;
-        entry.lod = desiredLod;
-        this.terrainGroup.add(newMesh);
+          this.disposeEntry(entry);
+          entry.mesh = newMesh;
+          entry.lod = desiredLod;
+          this.terrainGroup.add(newMesh);
 
-        gameEvents.emit('lod_changed', { cx: coords.cx, cy: coords.cy, lod: desiredLod });
+          gameEvents.emit('lod_changed', { cx: coords.cx, cy: coords.cy, lod: desiredLod });
+        }
       }
     }
+  }
+
+  /**
+   * Handle completed LOD rebuild mesh data from a worker.
+   *
+   * Guards against stale results: the chunk may have been unloaded
+   * or further LOD changes may have occurred while the worker was busy.
+   */
+  private onLodMeshReady(
+    key: ChunkKey,
+    cx: number,
+    cy: number,
+    lod: LODLevel,
+    meshData: ChunkMeshData,
+  ): void {
+    this.pendingLoads.delete(key);
+
+    const entry = this.loadedChunks.get(key);
+    if (!entry) {
+      // Chunk was unloaded while we were rebuilding -- discard.
+      return;
+    }
+
+    // Only apply if the LOD is still different (might have been
+    // rebuilt again by a subsequent sync path).
+    if (entry.lod === lod) {
+      return;
+    }
+
+    const newMesh = this.createMeshFromData(meshData, cx, cy);
+
+    this.disposeEntry(entry);
+    entry.mesh = newMesh;
+    entry.lod = lod;
+    this.terrainGroup.add(newMesh);
+
+    gameEvents.emit('lod_changed', { cx, cy, lod });
   }
 
   /**

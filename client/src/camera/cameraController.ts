@@ -3,7 +3,7 @@
  *
  * Features:
  * - Dynamic zoom levels with adaptive viewing angles (strategic overhead -> tactical angled)
- * - Keyboard controls (WASD/arrows pan, Q/E rotate, R/F zoom) with smooth acceleration
+ * - Keyboard controls (WASD/arrows pan, Q/E rotate, +/- zoom) with smooth acceleration
  * - Optional edge scrolling (mouse near screen edges)
  * - Map boundary enforcement (soft spring-back + hard clamp)
  * - Viewport frustum tracking for chunk visibility
@@ -41,6 +41,12 @@ const STRATEGIC_HEIGHT = 2000;
 const TACTICAL_HEIGHT = 500;
 const PRESET_ANIMATION_DURATION = 1.5;
 const GRID_CHUNKS = MAP_SIZE / CHUNK_SIZE;
+
+// Keyboard zoom-level presets (keys 1-4)
+const ZOOM_LEVEL_STRATEGIC = 4000;
+const ZOOM_LEVEL_REGIONAL = 2000;
+const ZOOM_LEVEL_TACTICAL = 600;
+const ZOOM_LEVEL_DETAIL = 150;
 
 // ── Input State ─────────────────────────────────────────────────────
 
@@ -510,11 +516,35 @@ export class CameraController {
       case 'KeyE':
         this.input.rotateRight = true;
         break;
-      case 'KeyR':
+      case 'Equal': // + key
+      case 'NumpadAdd':
         this.input.zoomIn = true;
         break;
-      case 'KeyF':
+      case 'Minus': // - key
+      case 'NumpadSubtract':
         this.input.zoomOut = true;
+        break;
+      case 'Space':
+        event.preventDefault();
+        this.jumpToCity(0, 0, DEFAULT_CAMERA_HEIGHT);
+        break;
+      case 'Digit1':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_STRATEGIC);
+        break;
+      case 'Digit2':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_REGIONAL);
+        break;
+      case 'Digit3':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_TACTICAL);
+        break;
+      case 'Digit4':
+        this.jumpToCity(this.controls.target.x, this.controls.target.z, ZOOM_LEVEL_DETAIL);
+        break;
+      case 'KeyP':
+        gameEvents.emit('toggle_overlay', undefined as void);
+        break;
+      case 'Escape':
+        gameEvents.emit('close_panel', undefined as void);
         break;
     }
   }
@@ -543,10 +573,12 @@ export class CameraController {
       case 'KeyE':
         this.input.rotateRight = false;
         break;
-      case 'KeyR':
+      case 'Equal':
+      case 'NumpadAdd':
         this.input.zoomIn = false;
         break;
-      case 'KeyF':
+      case 'Minus':
+      case 'NumpadSubtract':
         this.input.zoomOut = false;
         break;
     }
