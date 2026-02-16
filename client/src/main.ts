@@ -7,6 +7,7 @@ import { perfMonitor } from './core/perfMonitor';
 import { createLogger } from './core/logger';
 import { getStartupChecks, summarizeStartupChecks } from './startup';
 import { QUALITY_PRESETS, QUALITY_PRESET_ORDER, QualityPresetManager } from './core/qualityManager';
+import { ChunkLoader } from './world/chunkLoader';
 import type { CityData, CityTier, CultureType } from './types';
 
 const log = createLogger('main');
@@ -34,7 +35,7 @@ hud.innerHTML = `
   <h1>${APP_NAME}</h1>
   <div class="row" id="status">${startupStatus}</div>
   <div class="row" id="fps">FPS: ...</div>
-  <div class="row" id="net">Net: ...</div>
+  <div class="row" id="chunks">Chunks: ...</div>
   <div class="row" id="coords">Camera: x=0, y=0, z=0</div>
   <div class="row">
     <label for="quality-select">Quality</label>
@@ -45,7 +46,7 @@ app.appendChild(hud);
 
 const toast = document.createElement('div');
 toast.id = 'toast';
-toast.innerHTML = `<div class="title">Imperium started</div><div>Base scaffold active.</div>`;
+toast.innerHTML = `<div class="title">Imperium</div><div>Loading terrain...</div>`;
 app.appendChild(toast);
 
 const qualitySelect = document.querySelector<HTMLSelectElement>('#quality-select');
@@ -66,7 +67,7 @@ if (qualitySelect) {
 // ── Scene Setup ─────────────────────────────────────────────────
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0a1120, 1200, 2600);
+scene.fog = new THREE.Fog(0x0a1120, 800, 2000);
 scene.background = new THREE.Color(0x07111b);
 
 const camera = new THREE.PerspectiveCamera(
@@ -75,7 +76,8 @@ const camera = new THREE.PerspectiveCamera(
   NEAR_CLIP,
   FAR_CLIP,
 );
-camera.position.set(2600, DEFAULT_CAMERA_HEIGHT, 2400);
+// Start above Roma (tile 1024,1000 -> world 0, -24)
+camera.position.set(0, DEFAULT_CAMERA_HEIGHT, -24);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
@@ -86,24 +88,44 @@ canvasContainer.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.target.set(0, 0, 0);
-controls.maxPolarAngle = Math.PI * 0.49;
-controls.minDistance = 200;
-controls.maxDistance = 5000;
+controls.target.set(0, 40, -24);
+controls.maxPolarAngle = Math.PI * 0.45;
+controls.minDistance = 100;
+controls.maxDistance = 4000;
 
 // ── Lighting ────────────────────────────────────────────────────
 
-const ambientLight = new THREE.AmbientLight(0x8f9fb8, 0.55);
+const ambientLight = new THREE.AmbientLight(0x8f9fb8, 0.6);
 scene.add(ambientLight);
 
-const sun = new THREE.DirectionalLight(0xfff8e8, 1.1);
-sun.position.set(2000, 3200, 1800);
+// Warm golden-hour sun from the southwest
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.2);
+sun.position.set(-1500, 3000, -1200);
 scene.add(sun);
 
-// ── Placeholder Terrain ─────────────────────────────────────────
+// Fill light from opposite side
+const fill = new THREE.DirectionalLight(0xb8c8e8, 0.3);
+fill.position.set(1500, 1500, 1200);
+scene.add(fill);
 
-const terrainGroup = buildTerrainGroup();
-scene.add(terrainGroup);
+// ── Chunk-based Terrain ─────────────────────────────────────────
+
+const chunkLoader = new ChunkLoader(scene, { loadRadius: 6, unloadRadius: 10 });
+
+// ── Water Plane ─────────────────────────────────────────────────
+
+const waterGeometry = new THREE.PlaneGeometry(MAP_SIZE * 1.5, MAP_SIZE * 1.5);
+waterGeometry.rotateX(-Math.PI / 2);
+const waterMaterial = new THREE.MeshStandardMaterial({
+  color: 0x1a3a5c,
+  transparent: true,
+  opacity: 0.85,
+  roughness: 0.3,
+  metalness: 0.1,
+});
+const waterPlane = new THREE.Mesh(waterGeometry, waterMaterial);
+waterPlane.position.y = 19; // Just below WATER_LEVEL (20)
+scene.add(waterPlane);
 
 // ── Placeholder Cities ──────────────────────────────────────────
 
@@ -150,16 +172,28 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
 
 // ── Render Loop ─────────────────────────────────────────────────
 
+let toastCleared = false;
+
 function animate(): void {
   requestAnimationFrame(animate);
   perfMonitor.beginFrame();
 
   controls.update();
+
+  // Update chunk loading based on camera position
+  chunkLoader.update(camera.position.x, camera.position.z);
+
   renderer.render(scene, camera);
 
   perfMonitor.drawCalls = renderer.info.render.calls;
   perfMonitor.triangles = renderer.info.render.triangles;
   perfMonitor.endFrame();
+
+  // Clear the loading toast after first chunks arrive
+  if (!toastCleared && chunkLoader.loadedCount > 0) {
+    toastCleared = true;
+    setToast('Imperium', `${chunkLoader.loadedCount} chunks loaded`);
+  }
 
   // Update HUD every 30 frames
   if (renderer.info.render.frame % 30 === 0) {
@@ -174,12 +208,12 @@ function animate(): void {
     }
     const fpsNode = document.querySelector<HTMLDivElement>('#fps');
     if (fpsNode) {
-      fpsNode.textContent = `FPS: ${snap.fps} | Quality: ${QUALITY_PRESETS[activeProfile].label} | Draw: ${snap.drawCalls} | Tri: ${snap.triangles}`;
+      fpsNode.textContent = `FPS: ${snap.fps} | Draw: ${snap.drawCalls} | Tri: ${snap.triangles}`;
     }
 
-    const netNode = document.querySelector<HTMLDivElement>('#net');
-    if (netNode) {
-      netNode.textContent = `Net: ${getNetworkStatus()}`;
+    const chunksNode = document.querySelector<HTMLDivElement>('#chunks');
+    if (chunksNode) {
+      chunksNode.textContent = `Chunks: ${chunkLoader.loadedCount} loaded, ${chunkLoader.pendingCount} pending`;
     }
 
     const coordsNode = document.querySelector<HTMLDivElement>('#coords');
@@ -192,40 +226,6 @@ animate();
 log.info('Render loop started');
 
 // ── Helpers ─────────────────────────────────────────────────────
-
-function buildTerrainGroup(): THREE.Group {
-  const group = new THREE.Group();
-  const segments = 144;
-  const geom = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE, segments, segments);
-  geom.rotateX(-Math.PI / 2);
-
-  const positions = geom.attributes['position'] as THREE.BufferAttribute;
-  const colors: number[] = [];
-
-  for (let i = 0; i < positions.count; i++) {
-    const x = positions.getX(i);
-    const z = positions.getZ(i);
-    const noise = simpleNoise(x, z);
-    const height = 16 + noise * 80;
-    positions.setY(i, height);
-
-    const c = biomeColorFromNoise(noise);
-    colors.push(c.r, c.g, c.b);
-  }
-  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geom.computeVertexNormals();
-  positions.needsUpdate = true;
-
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    flatShading: false,
-    side: THREE.DoubleSide,
-    roughness: 0.95,
-    metalness: 0.02,
-  });
-  group.add(new THREE.Mesh(geom, mat));
-  return group;
-}
 
 function createCityMarker(city: CityData): THREE.Object3D {
   const worldX = city.tileX - MAP_SIZE / 2;
@@ -245,48 +245,8 @@ function createCityMarker(city: CityData): THREE.Object3D {
   return group;
 }
 
-function simpleNoise(x: number, z: number): number {
-  const nx = Math.sin(x * 0.013) + Math.cos(z * 0.011);
-  const ny = Math.cos(x * 0.006) * Math.sin(z * 0.007);
-  return (nx + ny + 2) / 4;
-}
-
-function biomeColorFromNoise(n: number): THREE.Color {
-  if (n < 0.18) return new THREE.Color(0x1a3a5c);
-  if (n < 0.33) return new THREE.Color(0x2d5f8a);
-  if (n < 0.52) return new THREE.Color(0xc4a854);
-  if (n < 0.72) return new THREE.Color(0x5a8a3c);
-  return new THREE.Color(0x6a6a6a);
-}
-
 function setToast(title: string, body: string): void {
   toast.innerHTML = `<div class="title">${title}</div><div>${body}</div>`;
-}
-
-function getNetworkStatus(): string {
-  const hasEffectiveConnection = 'connection' in navigator;
-  if (!hasEffectiveConnection) {
-    return navigator.onLine ? 'online' : 'offline';
-  }
-
-  const connection = (navigator as Navigator & { connection?: { effectiveType?: string; downlink?: number } }).connection;
-  if (!connection) {
-    return navigator.onLine ? 'online' : 'offline';
-  }
-
-  const parts = [];
-  if (connection.effectiveType) {
-    parts.push(connection.effectiveType);
-  }
-  if (typeof connection.downlink === 'number') {
-    parts.push(`${Math.round(connection.downlink)} Mbps`);
-  }
-
-  if (parts.length > 0) {
-    return parts.join(' / ');
-  }
-
-  return navigator.onLine ? 'online' : 'offline';
 }
 
 // ── Resize Handler ──────────────────────────────────────────────
