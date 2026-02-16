@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Imperium</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #07111b; color: #e0ddd4; font-family: 'Segoe UI', system-ui, sans-serif; }
+      #app { width: 100%; height: 100%; position: relative; }
+
+      #hud {
+        position: absolute; top: 12px; left: 12px;
+        background: rgba(10, 17, 32, 0.85); border: 1px solid rgba(194, 162, 85, 0.3);
+        border-radius: 6px; padding: 10px 14px; pointer-events: auto;
+        font-size: 13px; line-height: 1.6; min-width: 220px;
+        backdrop-filter: blur(6px);
+      }
+      #hud h1 { font-size: 16px; color: #c2a255; margin-bottom: 6px; font-weight: 600; letter-spacing: 1px; }
+      #hud .row { color: #8a9ab5; }
+      #hud label { color: #8a9ab5; margin-right: 6px; }
+      #hud select {
+        background: rgba(10, 17, 32, 0.9); color: #c2a255; border: 1px solid rgba(194, 162, 85, 0.3);
+        border-radius: 3px; padding: 2px 6px; font-size: 12px;
+      }
+
+      #toast {
+        position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+        background: rgba(10, 17, 32, 0.9); border: 1px solid rgba(194, 162, 85, 0.4);
+        border-radius: 6px; padding: 8px 16px; pointer-events: none;
+        font-size: 13px; text-align: center; backdrop-filter: blur(6px);
+      }
+      #toast .title { color: #c2a255; font-weight: 600; }
+
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
