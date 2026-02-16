@@ -565,7 +565,7 @@ describe('generateProceduralChunk', () => {
         const flag = chunk.flags[i]!;
 
         // Flag value should be a valid combination of defined flags
-        const validFlags =
+        const validFlagMask =
           TileFlags.HAS_ROAD |
           TileFlags.HAS_RIVER |
           TileFlags.HAS_RESOURCE |
@@ -575,9 +575,9 @@ describe('generateProceduralChunk', () => {
           TileFlags.HAS_WALL |
           TileFlags.RESERVED;
 
-        // All set bits should be within valid flag range (0-255 for Uint8Array)
+        // All set bits should be within valid flag range
         expect(flag).toBeGreaterThanOrEqual(0);
-        expect(flag).toBeLessThanOrEqual(255);
+        expect(flag & ~validFlagMask).toBe(0);
       }
     });
   });
