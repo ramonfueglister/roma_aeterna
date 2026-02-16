@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import { APP_NAME, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAP_SIZE, NEAR_CLIP, CAMERA_FOV, MAX_PIXEL_RATIO } from './config';
 import { testSupabaseConnection } from './supabase';
@@ -8,7 +7,10 @@ import { createLogger } from './core/logger';
 import { getStartupChecks, summarizeStartupChecks } from './startup';
 import { QUALITY_PRESETS, QUALITY_PRESET_ORDER, QualityPresetManager } from './core/qualityManager';
 import { ChunkLoader } from './world/chunkLoader';
-import type { CityData, CityTier, CultureType } from './types';
+import { WaterRenderer } from './world/waterRenderer';
+import { CameraController } from './camera/cameraController';
+import { PostProcessingPipeline } from './rendering/postProcessing';
+import type { CityData, CityTier, CultureType, QualityPreset } from './types';
 
 const log = createLogger('main');
 
@@ -53,13 +55,10 @@ const qualitySelect = document.querySelector<HTMLSelectElement>('#quality-select
 if (qualitySelect) {
   qualitySelect.value = qualityManager.currentPreset;
   qualitySelect.addEventListener('change', () => {
-    const selected = qualitySelect.value as 'high' | 'medium' | 'low' | 'toaster';
+    const selected = qualitySelect.value as QualityPreset;
     const changed = qualityManager.setPreset(selected);
     if (changed) {
-      const statusNode = document.querySelector<HTMLDivElement>('#status');
-      if (statusNode) {
-        statusNode.textContent = `Quality profile: ${QUALITY_PRESETS[selected].label}`;
-      }
+      applyQualityPreset(selected);
     }
   });
 }
@@ -76,7 +75,6 @@ const camera = new THREE.PerspectiveCamera(
   NEAR_CLIP,
   FAR_CLIP,
 );
-// Start above Roma (tile 1024,1000 -> world 0, -24)
 camera.position.set(0, DEFAULT_CAMERA_HEIGHT, -24);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -84,26 +82,20 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
 renderer.setSize(window.innerWidth, window.innerHeight);
 canvasContainer.appendChild(renderer.domElement);
 
-// ── Controls ────────────────────────────────────────────────────
+// ── Camera Controller ────────────────────────────────────────────
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.target.set(0, 40, -24);
-controls.maxPolarAngle = Math.PI * 0.45;
-controls.minDistance = 100;
-controls.maxDistance = 4000;
+const cameraController = new CameraController(camera, renderer.domElement, scene);
+cameraController.orbitControls.target.set(0, 40, -24);
 
 // ── Lighting ────────────────────────────────────────────────────
 
 const ambientLight = new THREE.AmbientLight(0x8f9fb8, 0.6);
 scene.add(ambientLight);
 
-// Warm golden-hour sun from the southwest
 const sun = new THREE.DirectionalLight(0xfff0d0, 1.2);
 sun.position.set(-1500, 3000, -1200);
 scene.add(sun);
 
-// Fill light from opposite side
 const fill = new THREE.DirectionalLight(0xb8c8e8, 0.3);
 fill.position.set(1500, 1500, 1200);
 scene.add(fill);
@@ -112,20 +104,16 @@ scene.add(fill);
 
 const chunkLoader = new ChunkLoader(scene, { loadRadius: 6, unloadRadius: 10 });
 
-// ── Water Plane ─────────────────────────────────────────────────
+// ── Animated Water ──────────────────────────────────────────────
 
-const waterGeometry = new THREE.PlaneGeometry(MAP_SIZE * 1.5, MAP_SIZE * 1.5);
-waterGeometry.rotateX(-Math.PI / 2);
-const waterMaterial = new THREE.MeshStandardMaterial({
-  color: 0x1a3a5c,
-  transparent: true,
-  opacity: 0.85,
-  roughness: 0.3,
-  metalness: 0.1,
+const water = new WaterRenderer(scene, {
+  quality: QUALITY_PRESETS[qualityManager.currentPreset].waterShader,
 });
-const waterPlane = new THREE.Mesh(waterGeometry, waterMaterial);
-waterPlane.position.y = 19; // Just below WATER_LEVEL (20)
-scene.add(waterPlane);
+
+// ── Post-Processing Pipeline ────────────────────────────────────
+
+const postfx = new PostProcessingPipeline(renderer, scene, camera);
+postfx.setQuality(qualityManager.currentPreset);
 
 // ── Placeholder Cities ──────────────────────────────────────────
 
@@ -165,6 +153,10 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
       const cityData = cityObj?.userData as CityData | undefined;
       if (cityData) {
         setToast(`Selected: ${cityData.name}`, `${cityData.culture}, Tier ${cityData.tier}`);
+        // Fly camera to selected city
+        const worldX = cityData.tileX - MAP_SIZE / 2;
+        const worldZ = cityData.tileY - MAP_SIZE / 2;
+        cameraController.jumpToCity(worldX, worldZ, 800);
       }
     }
   }
@@ -173,17 +165,27 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
 // ── Render Loop ─────────────────────────────────────────────────
 
 let toastCleared = false;
+const clock = new THREE.Clock();
+let lastQualityPreset = qualityManager.currentPreset;
 
 function animate(): void {
   requestAnimationFrame(animate);
   perfMonitor.beginFrame();
 
-  controls.update();
+  const deltaTime = clock.getDelta();
+  const elapsed = clock.getElapsedTime();
+
+  // Update camera controller (replaces OrbitControls.update)
+  cameraController.update(deltaTime);
 
   // Update chunk loading based on camera position
   chunkLoader.update(camera.position.x, camera.position.z);
 
-  renderer.render(scene, camera);
+  // Update animated water
+  water.update(elapsed, camera.position);
+
+  // Render through post-processing pipeline
+  postfx.render();
 
   perfMonitor.drawCalls = renderer.info.render.calls;
   perfMonitor.triangles = renderer.info.render.triangles;
@@ -199,13 +201,16 @@ function animate(): void {
   if (renderer.info.render.frame % 30 === 0) {
     const snap = perfMonitor.snapshot();
     const activeProfile = qualityManager.updateFromSnapshot(snap);
-    if (qualitySelect && qualitySelect.value !== activeProfile) {
-      qualitySelect.value = activeProfile;
-      const statusNode = document.querySelector<HTMLDivElement>('#status');
-      if (statusNode) {
-        statusNode.textContent = `Quality profile: ${QUALITY_PRESETS[activeProfile].label}`;
+
+    // Sync quality across all systems when auto-adjusted
+    if (activeProfile !== lastQualityPreset) {
+      lastQualityPreset = activeProfile;
+      applyQualityPreset(activeProfile);
+      if (qualitySelect && qualitySelect.value !== activeProfile) {
+        qualitySelect.value = activeProfile;
       }
     }
+
     const fpsNode = document.querySelector<HTMLDivElement>('#fps');
     if (fpsNode) {
       fpsNode.textContent = `FPS: ${snap.fps} | Draw: ${snap.drawCalls} | Tri: ${snap.triangles}`;
@@ -224,6 +229,19 @@ function animate(): void {
 }
 animate();
 log.info('Render loop started');
+
+// ── Quality Preset Sync ─────────────────────────────────────────
+
+function applyQualityPreset(preset: QualityPreset): void {
+  const config = QUALITY_PRESETS[preset];
+  postfx.setQuality(preset);
+  water.setQuality(config.waterShader);
+
+  const statusNode = document.querySelector<HTMLDivElement>('#status');
+  if (statusNode) {
+    statusNode.textContent = `Quality profile: ${config.label}`;
+  }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -255,6 +273,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  postfx.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ── Supabase Connection Check ───────────────────────────────────
