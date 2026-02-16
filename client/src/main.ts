@@ -11,6 +11,7 @@ import { ChunkLoader } from './world/chunkLoader';
 import { WaterRenderer } from './world/waterRenderer';
 import { ProvinceRenderer } from './world/provinceRenderer';
 import { CityRenderer } from './world/cityDatabase';
+import { TreeRenderer } from './world/treeRenderer';
 import { CameraController } from './camera/cameraController';
 import { PostProcessingPipeline } from './rendering/postProcessing';
 import { generateProceduralChunk } from './world/proceduralChunk';
@@ -124,15 +125,23 @@ postfx.setQuality(qualityManager.currentPreset);
 const provinceRenderer = new ProvinceRenderer(scene);
 provinceRenderer.setQuality(qualityManager.currentPreset);
 
-// Feed province data into the overlay as chunks load
-gameEvents.on('chunk_loaded', ({ cx, cy }) => {
-  const chunkData = generateProceduralChunk(cx, cy);
-  provinceRenderer.updateChunkProvinces(cx, cy, chunkData.provinces);
-});
-
 // ── City Renderer ────────────────────────────────────────────────
 
 const cityRenderer = new CityRenderer(scene);
+
+// ── Tree Instances ───────────────────────────────────────────────
+
+const treeRenderer = new TreeRenderer(scene);
+treeRenderer.setMaxInstances(QUALITY_PRESETS[qualityManager.currentPreset].treeInstances);
+
+// ── Chunk Data Listeners ─────────────────────────────────────────
+
+// Feed province + tree data into their renderers as chunks load
+gameEvents.on('chunk_loaded', ({ cx, cy }) => {
+  const chunkData = generateProceduralChunk(cx, cy);
+  provinceRenderer.updateChunkProvinces(cx, cy, chunkData.provinces);
+  treeRenderer.updateChunkTrees(cx, cy, chunkData.heights, chunkData.biomes);
+});
 
 // ── Interaction ─────────────────────────────────────────────────
 
@@ -180,6 +189,9 @@ function animate(): void {
 
   // Update city markers (LOD zone transitions)
   cityRenderer.update(camera.position.y, camera.position.x, camera.position.z);
+
+  // Update tree instances (camera-distance culled)
+  treeRenderer.update(camera.position.x, camera.position.y, camera.position.z);
 
   // Update animated water
   water.update(elapsed, camera.position);
@@ -237,6 +249,7 @@ function applyQualityPreset(preset: QualityPreset): void {
   postfx.setQuality(preset);
   water.setQuality(config.waterShader);
   provinceRenderer.setQuality(preset);
+  treeRenderer.setMaxInstances(config.treeInstances);
 
   const statusNode = document.querySelector<HTMLDivElement>('#status');
   if (statusNode) {
