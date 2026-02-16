@@ -6,11 +6,15 @@ import { perfMonitor } from './core/perfMonitor';
 import { createLogger } from './core/logger';
 import { getStartupChecks, summarizeStartupChecks } from './startup';
 import { QUALITY_PRESETS, QUALITY_PRESET_ORDER, QualityPresetManager } from './core/qualityManager';
+import { gameEvents } from './core/eventBus';
 import { ChunkLoader } from './world/chunkLoader';
 import { WaterRenderer } from './world/waterRenderer';
+import { ProvinceRenderer } from './world/provinceRenderer';
+import { CityRenderer } from './world/cityDatabase';
 import { CameraController } from './camera/cameraController';
 import { PostProcessingPipeline } from './rendering/postProcessing';
-import type { CityData, CityTier, CultureType, QualityPreset } from './types';
+import { generateProceduralChunk } from './world/proceduralChunk';
+import type { QualityPreset } from './types';
 
 const log = createLogger('main');
 
@@ -115,22 +119,20 @@ const water = new WaterRenderer(scene, {
 const postfx = new PostProcessingPipeline(renderer, scene, camera);
 postfx.setQuality(qualityManager.currentPreset);
 
-// ── Placeholder Cities ──────────────────────────────────────────
+// ── Province Overlay ──────────────────────────────────────────────
 
-const cityGroup = new THREE.Group();
-scene.add(cityGroup);
+const provinceRenderer = new ProvinceRenderer(scene);
+provinceRenderer.setQuality(qualityManager.currentPreset);
 
-const knownCities: CityData[] = [
-  { id: 'roma', name: 'Roma', latinName: 'Roma', tileX: 1024, tileY: 1000, tier: 1 as CityTier, culture: 'roman' as CultureType, population: 1000000, provinceId: 27, isPort: false, isCapital: true },
-  { id: 'alex', name: 'Alexandria', latinName: 'Alexandria', tileX: 1280, tileY: 1245, tier: 1 as CityTier, culture: 'egyptian' as CultureType, population: 500000, provinceId: 2, isPort: true, isCapital: true },
-  { id: 'carth', name: 'Carthago', latinName: 'Carthago', tileX: 840, tileY: 1185, tier: 2 as CityTier, culture: 'north_african' as CultureType, population: 300000, provinceId: 3, isPort: true, isCapital: true },
-  { id: 'athen', name: 'Athenae', latinName: 'Athenae', tileX: 1130, tileY: 940, tier: 2 as CityTier, culture: 'greek' as CultureType, population: 250000, provinceId: 1, isPort: true, isCapital: true },
-];
+// Feed province data into the overlay as chunks load
+gameEvents.on('chunk_loaded', ({ cx, cy }) => {
+  const chunkData = generateProceduralChunk(cx, cy);
+  provinceRenderer.updateChunkProvinces(cx, cy, chunkData.provinces);
+});
 
-for (const city of knownCities) {
-  const marker = createCityMarker(city);
-  cityGroup.add(marker);
-}
+// ── City Renderer ────────────────────────────────────────────────
+
+const cityRenderer = new CityRenderer(scene);
 
 // ── Interaction ─────────────────────────────────────────────────
 
@@ -143,22 +145,14 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects(cityGroup.children, true);
-  if (hits.length > 0) {
-    const hit = hits[0];
-    if (hit) {
-      const cityObj = cityGroup.children.find(
-        (c) => c === hit.object || c.children.includes(hit.object),
-      );
-      const cityData = cityObj?.userData as CityData | undefined;
-      if (cityData) {
-        setToast(`Selected: ${cityData.name}`, `${cityData.culture}, Tier ${cityData.tier}`);
-        // Fly camera to selected city
-        const worldX = cityData.tileX - MAP_SIZE / 2;
-        const worldZ = cityData.tileY - MAP_SIZE / 2;
-        cameraController.jumpToCity(worldX, worldZ, 800);
-      }
-    }
+  const cityData = cityRenderer.raycast(raycaster);
+  if (cityData) {
+    setToast(`Selected: ${cityData.name}`, `${cityData.culture}, Tier ${cityData.tier}`);
+    gameEvents.emit('city_selected', cityData);
+    // Fly camera to selected city
+    const worldX = cityData.tileX - MAP_SIZE / 2;
+    const worldZ = cityData.tileY - MAP_SIZE / 2;
+    cameraController.jumpToCity(worldX, worldZ, 800);
   }
 });
 
@@ -180,6 +174,12 @@ function animate(): void {
 
   // Update chunk loading based on camera position
   chunkLoader.update(camera.position.x, camera.position.z);
+
+  // Update province overlay (camera-height dependent visibility)
+  provinceRenderer.update(camera.position.y);
+
+  // Update city markers (LOD zone transitions)
+  cityRenderer.update(camera.position.y, camera.position.x, camera.position.z);
 
   // Update animated water
   water.update(elapsed, camera.position);
@@ -236,6 +236,7 @@ function applyQualityPreset(preset: QualityPreset): void {
   const config = QUALITY_PRESETS[preset];
   postfx.setQuality(preset);
   water.setQuality(config.waterShader);
+  provinceRenderer.setQuality(preset);
 
   const statusNode = document.querySelector<HTMLDivElement>('#status');
   if (statusNode) {
@@ -244,24 +245,6 @@ function applyQualityPreset(preset: QualityPreset): void {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
-
-function createCityMarker(city: CityData): THREE.Object3D {
-  const worldX = city.tileX - MAP_SIZE / 2;
-  const worldZ = city.tileY - MAP_SIZE / 2;
-  const group = new THREE.Group();
-  group.position.set(worldX, 70, worldZ);
-  group.userData = city;
-
-  const size = city.tier === 1 ? 24 : city.tier === 2 ? 18 : 12;
-  const color = city.culture === 'roman' ? 0xc2a255 : city.culture === 'greek' ? 0x6f8bbf : 0xd49a61;
-  const geometry = new THREE.BoxGeometry(size, size, size);
-  const material = new THREE.MeshStandardMaterial({ color });
-  const core = new THREE.Mesh(geometry, material);
-  core.position.y = size / 2;
-  group.add(core);
-
-  return group;
-}
 
 function setToast(title: string, body: string): void {
   toast.innerHTML = `<div class="title">${title}</div><div>${body}</div>`;
