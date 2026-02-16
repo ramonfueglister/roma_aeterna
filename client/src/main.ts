@@ -5,6 +5,8 @@ import { APP_NAME, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAP_SIZE, NEAR_CLIP, CAMERA_
 import { testSupabaseConnection } from './supabase';
 import { perfMonitor } from './core/perfMonitor';
 import { createLogger } from './core/logger';
+import { getStartupChecks, summarizeStartupChecks } from './startup';
+import { QUALITY_PRESETS, QUALITY_PRESET_ORDER, QualityPresetManager } from './core/qualityManager';
 import type { CityData, CityTier, CultureType } from './types';
 
 const log = createLogger('main');
@@ -19,13 +21,25 @@ canvasContainer.style.width = '100%';
 canvasContainer.style.height = '100%';
 app.appendChild(canvasContainer);
 
+const startupReport = getStartupChecks();
+const startupStatus = summarizeStartupChecks(startupReport);
+const qualityManager = new QualityPresetManager();
+const qualityOptions = QUALITY_PRESET_ORDER
+  .map((preset) => `<option value="${preset}">${QUALITY_PRESETS[preset].label}</option>`)
+  .join('');
+
 const hud = document.createElement('div');
 hud.id = 'hud';
 hud.innerHTML = `
   <h1>${APP_NAME}</h1>
-  <div class="row" id="status">Supabase: checking...</div>
+  <div class="row" id="status">${startupStatus}</div>
   <div class="row" id="fps">FPS: ...</div>
+  <div class="row" id="net">Net: ...</div>
   <div class="row" id="coords">Camera: x=0, y=0, z=0</div>
+  <div class="row">
+    <label for="quality-select">Quality</label>
+    <select id="quality-select">${qualityOptions}</select>
+  </div>
 `;
 app.appendChild(hud);
 
@@ -33,6 +47,21 @@ const toast = document.createElement('div');
 toast.id = 'toast';
 toast.innerHTML = `<div class="title">Imperium started</div><div>Base scaffold active.</div>`;
 app.appendChild(toast);
+
+const qualitySelect = document.querySelector<HTMLSelectElement>('#quality-select');
+if (qualitySelect) {
+  qualitySelect.value = qualityManager.currentPreset;
+  qualitySelect.addEventListener('change', () => {
+    const selected = qualitySelect.value as 'high' | 'medium' | 'low' | 'toaster';
+    const changed = qualityManager.setPreset(selected);
+    if (changed) {
+      const statusNode = document.querySelector<HTMLDivElement>('#status');
+      if (statusNode) {
+        statusNode.textContent = `Quality profile: ${QUALITY_PRESETS[selected].label}`;
+      }
+    }
+  });
+}
 
 // ── Scene Setup ─────────────────────────────────────────────────
 
@@ -135,8 +164,23 @@ function animate(): void {
   // Update HUD every 30 frames
   if (renderer.info.render.frame % 30 === 0) {
     const snap = perfMonitor.snapshot();
+    const activeProfile = qualityManager.updateFromSnapshot(snap);
+    if (qualitySelect && qualitySelect.value !== activeProfile) {
+      qualitySelect.value = activeProfile;
+      const statusNode = document.querySelector<HTMLDivElement>('#status');
+      if (statusNode) {
+        statusNode.textContent = `Quality profile: ${QUALITY_PRESETS[activeProfile].label}`;
+      }
+    }
     const fpsNode = document.querySelector<HTMLDivElement>('#fps');
-    if (fpsNode) fpsNode.textContent = `FPS: ${snap.fps} | Draw: ${snap.drawCalls} | Tri: ${snap.triangles}`;
+    if (fpsNode) {
+      fpsNode.textContent = `FPS: ${snap.fps} | Quality: ${QUALITY_PRESETS[activeProfile].label} | Draw: ${snap.drawCalls} | Tri: ${snap.triangles}`;
+    }
+
+    const netNode = document.querySelector<HTMLDivElement>('#net');
+    if (netNode) {
+      netNode.textContent = `Net: ${getNetworkStatus()}`;
+    }
 
     const coordsNode = document.querySelector<HTMLDivElement>('#coords');
     if (coordsNode) {
@@ -217,6 +261,32 @@ function biomeColorFromNoise(n: number): THREE.Color {
 
 function setToast(title: string, body: string): void {
   toast.innerHTML = `<div class="title">${title}</div><div>${body}</div>`;
+}
+
+function getNetworkStatus(): string {
+  const hasEffectiveConnection = 'connection' in navigator;
+  if (!hasEffectiveConnection) {
+    return navigator.onLine ? 'online' : 'offline';
+  }
+
+  const connection = (navigator as Navigator & { connection?: { effectiveType?: string; downlink?: number } }).connection;
+  if (!connection) {
+    return navigator.onLine ? 'online' : 'offline';
+  }
+
+  const parts = [];
+  if (connection.effectiveType) {
+    parts.push(connection.effectiveType);
+  }
+  if (typeof connection.downlink === 'number') {
+    parts.push(`${Math.round(connection.downlink)} Mbps`);
+  }
+
+  if (parts.length > 0) {
+    return parts.join(' / ');
+  }
+
+  return navigator.onLine ? 'online' : 'offline';
 }
 
 // ── Resize Handler ──────────────────────────────────────────────

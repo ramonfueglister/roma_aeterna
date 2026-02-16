@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   clamp, lerp, smoothstep,
-  worldToChunk, chunkToWorld, tileToIndex, indexToTile,
+  worldToChunk, chunkToWorld, tileToChunkLocal, tileToIndex, indexToTile, tileToWorld,
   chunkKey, chunkManhattan, distance, distanceSq,
   isInBounds, isChunkInBounds, spiralOrder,
 } from '../core/math';
@@ -78,6 +78,28 @@ describe('chunkToWorld', () => {
   });
   it('converts last chunk', () => {
     expect(chunkToWorld(63, 63)).toEqual({ tileX: 2016, tileY: 2016 });
+  });
+});
+
+describe('tileToChunkLocal', () => {
+  it('returns local coordinates inside chunk', () => {
+    expect(tileToChunkLocal(0, 0)).toEqual({ x: 0, y: 0 });
+    expect(tileToChunkLocal(32, 47)).toEqual({ x: 0, y: 15 });
+  });
+
+  it('clamps negative world coordinates', () => {
+    expect(tileToChunkLocal(-10, -10)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('clamps upper-bound world coordinates', () => {
+    expect(tileToChunkLocal(2047, 2047)).toEqual({ x: 31, y: 31 });
+  });
+});
+
+describe('tileToWorld', () => {
+  it('converts local tile coordinates to world tile coordinates', () => {
+    expect(tileToWorld(1, 2, 3, 4)).toEqual({ tileX: 35, tileY: 68 });
+    expect(tileToWorld(0, 0, 0, 0)).toEqual({ tileX: 0, tileY: 0 });
   });
 });
 

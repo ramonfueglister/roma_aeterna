@@ -37,9 +37,34 @@ export function chunkToWorld(cx: number, cy: number): { tileX: number; tileY: nu
   };
 }
 
+/** Convert a world tile coordinate to local coordinates inside a chunk. */
+export function tileToChunkLocal(tileX: number, tileY: number): { x: number; y: number } {
+  const clampedX = clamp(tileX, 0, MAP_SIZE - 1);
+  const clampedY = clamp(tileY, 0, MAP_SIZE - 1);
+  const { cx, cy } = worldToChunk(clampedX, clampedY);
+
+  return {
+    x: clampedX - cx * CHUNK_SIZE,
+    y: clampedY - cy * CHUNK_SIZE,
+  };
+}
+
 /** Convert tile coordinate to local index within a chunk (0-1023). */
 export function tileToIndex(localX: number, localY: number): number {
   return localY * CHUNK_SIZE + localX;
+}
+
+/** Convert chunk-local tile coordinates to absolute world tile coordinates. */
+export function tileToWorld(
+  cx: number,
+  cy: number,
+  localX: number,
+  localY: number,
+): { tileX: number; tileY: number } {
+  return {
+    tileX: cx * CHUNK_SIZE + localX,
+    tileY: cy * CHUNK_SIZE + localY,
+  };
 }
 
 /** Convert local index to local tile coordinates within a chunk. */
