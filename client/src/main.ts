@@ -95,16 +95,14 @@ cameraController.orbitControls.target.set(0, 40, -24);
 
 // ── Lighting ────────────────────────────────────────────────────
 
-const ambientLight = new THREE.AmbientLight(0x8f9fb8, 0.6);
+// Spec Section 22: Ambient RGB(140, 155, 180), intensity 0.4
+const ambientLight = new THREE.AmbientLight(0x8c9bb4, 0.4);
 scene.add(ambientLight);
 
-const sun = new THREE.DirectionalLight(0xfff0d0, 1.2);
+// Spec Section 22: Sun RGB(255, 248, 235), intensity 1.0, from southwest 35° elevation
+const sun = new THREE.DirectionalLight(0xfff8eb, 1.0);
 sun.position.set(-1500, 3000, -1200);
 scene.add(sun);
-
-const fill = new THREE.DirectionalLight(0xb8c8e8, 0.3);
-fill.position.set(1500, 1500, 1200);
-scene.add(fill);
 
 // ── Worker Pool ─────────────────────────────────────────────────
 
@@ -212,6 +210,9 @@ function animate(): void {
 
   // Update animated water
   water.update(elapsed, camera.position);
+
+  // Update post-processing (parchment overlay height-dependent)
+  postfx.updateCameraHeight(camera.position.y);
 
   // Render through post-processing pipeline
   postfx.render();

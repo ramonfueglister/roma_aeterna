@@ -3,7 +3,7 @@
  *
  * Features:
  * - Dynamic zoom levels with adaptive viewing angles (strategic overhead -> tactical angled)
- * - Keyboard controls (WASD/arrows pan, Q/E rotate, R/F zoom) with smooth acceleration
+ * - Keyboard controls (WASD/arrows pan, Q/E rotate, +/- zoom) with smooth acceleration
  * - Optional edge scrolling (mouse near screen edges)
  * - Map boundary enforcement (soft spring-back + hard clamp)
  * - Viewport frustum tracking for chunk visibility
@@ -516,12 +516,12 @@ export class CameraController {
       case 'KeyE':
         this.input.rotateRight = true;
         break;
-      case 'KeyR':
       case 'Equal': // + key
+      case 'NumpadAdd':
         this.input.zoomIn = true;
         break;
-      case 'KeyF':
       case 'Minus': // - key
+      case 'NumpadSubtract':
         this.input.zoomOut = true;
         break;
       case 'Space':
@@ -573,12 +573,12 @@ export class CameraController {
       case 'KeyE':
         this.input.rotateRight = false;
         break;
-      case 'KeyR':
       case 'Equal':
+      case 'NumpadAdd':
         this.input.zoomIn = false;
         break;
-      case 'KeyF':
       case 'Minus':
+      case 'NumpadSubtract':
         this.input.zoomOut = false;
         break;
     }

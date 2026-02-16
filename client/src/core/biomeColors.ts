@@ -9,28 +9,28 @@
 import { BiomeType } from '../types';
 import { MAP_SIZE, MAP_EDGE_FADE_TILES, BARBARIAN_PROVINCE_ID, CHUNK_SIZE } from '../config';
 
-/** Base biome colors as 0xRRGGBB values. */
+/** Base biome colors as 0xRRGGBB values (SPECS.md Section 11). */
 export const BIOME_COLORS: Record<BiomeType, number> = {
-  [BiomeType.WATER_DEEP]: 0x1a3a5c,
-  [BiomeType.WATER_SHALLOW]: 0x2d5f8a,
-  [BiomeType.SAND]: 0xc4a854,
-  [BiomeType.GRASS]: 0x5a8a3c,
-  [BiomeType.FOREST]: 0x3d6b2e,
-  [BiomeType.DENSE_FOREST]: 0x2a5420,
-  [BiomeType.SCRUB]: 0x8a9a5c,
-  [BiomeType.FARMLAND]: 0x7aa04a,
-  [BiomeType.MARSH]: 0x4a6a4a,
-  [BiomeType.DESERT]: 0xd4b862,
-  [BiomeType.MOUNTAIN]: 0x6a6a6a,
-  [BiomeType.SNOW]: 0xdadae0,
-  [BiomeType.ROAD]: 0x8a7a62,
-  [BiomeType.RIVER]: 0x3a6a8a,
-  [BiomeType.CITY]: 0xa09070,
-  [BiomeType.COAST]: 0xa0905a,
-  [BiomeType.STEPPE]: 0x9a9a5c,
-  [BiomeType.VOLCANIC]: 0x4a3a30,
-  [BiomeType.OLIVE_GROVE]: 0x5a7a3a,
-  [BiomeType.VINEYARD]: 0x6a5a3a,
+  [BiomeType.WATER_DEEP]: 0x14326e,      // deep_sea        (20,  50,  110)
+  [BiomeType.WATER_SHALLOW]: 0x4073a6,   // shallow_sea     (64,  115, 166)
+  [BiomeType.SAND]: 0xe6d7aa,            // sand_beach      (230, 215, 170)
+  [BiomeType.GRASS]: 0x61914f,           // grassland       (97,  145, 79)
+  [BiomeType.FOREST]: 0x8cad61,          // mediterranean   (140, 173, 97)
+  [BiomeType.DENSE_FOREST]: 0x2e5c1a,   // dense_forest    (46,  92,  26)
+  [BiomeType.SCRUB]: 0xb3a66b,          // arid_scrub      (179, 166, 107)
+  [BiomeType.FARMLAND]: 0x7a9e47,       // fertile         (122, 158, 71)
+  [BiomeType.MARSH]: 0x597a4d,          // marsh           (89,  122, 77)
+  [BiomeType.DESERT]: 0xd9c78c,         // desert          (217, 199, 140)
+  [BiomeType.MOUNTAIN]: 0x8c857a,       // mountain        (140, 133, 122)
+  [BiomeType.SNOW]: 0xe6ebf2,           // snow            (230, 235, 242)
+  [BiomeType.ROAD]: 0xa08c6e,           // cliff           (160, 140, 110)
+  [BiomeType.RIVER]: 0x4e91b4,          // river           (78,  145, 180)
+  [BiomeType.CITY]: 0x736c62,           // mountain_dark   (115, 108, 98)
+  [BiomeType.COAST]: 0x64c8d2,          // coast_water     (100, 200, 210)
+  [BiomeType.STEPPE]: 0xa0945f,         // arid_scrub_dark (160, 148, 95)
+  [BiomeType.VOLCANIC]: 0x234b14,       // forest_dark     (35,  75,  20)
+  [BiomeType.OLIVE_GROVE]: 0x789652,    // med_dark        (120, 150, 82)
+  [BiomeType.VINEYARD]: 0xc3b45a,       // fertile_field   (195, 180, 90)
 };
 
 /**

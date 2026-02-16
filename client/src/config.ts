@@ -22,7 +22,7 @@ export const DEFAULT_CAMERA_HEIGHT = 1800;
 export const MIN_ZOOM = 50;
 export const MAX_ZOOM = 5000;
 export const FAR_CLIP = 12000;
-export const NEAR_CLIP = 0.1;
+export const NEAR_CLIP = 0.5;
 export const CAMERA_FOV = 45;
 
 // ── Rendering ───────────────────────────────────────────────────
