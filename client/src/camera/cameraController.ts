@@ -42,6 +42,11 @@ const TACTICAL_HEIGHT = 500;
 const PRESET_ANIMATION_DURATION = 1.5;
 const GRID_CHUNKS = MAP_SIZE / CHUNK_SIZE;
 
+// Dynamic FOV: wider at strategic zoom, narrower for tactical detail
+const FOV_STRATEGIC = 60;      // Wide FOV at max altitude
+const FOV_TACTICAL = 40;       // Narrow FOV at close zoom (matches CAMERA_FOV≈45)
+const FOV_LERP_SPEED = 0.08;   // Smooth interpolation rate per frame
+
 // Keyboard zoom-level presets (keys 1-4)
 const ZOOM_LEVEL_STRATEGIC = 4000;
 const ZOOM_LEVEL_REGIONAL = 2000;
@@ -122,9 +127,9 @@ export class CameraController {
     this.controls.maxPolarAngle = TACTICAL_POLAR_ANGLE;
     this.controls.enablePan = false; // We handle panning manually
     this.controls.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
+      LEFT: THREE.MOUSE.PAN,
       MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.ROTATE,
     };
 
     this.input = {
@@ -188,6 +193,7 @@ export class CameraController {
 
     this.controls.update();
     this.enforceBoundaries();
+    this.updateDynamicFOV();
     this.checkAndEmitEvents();
   }
 
@@ -275,9 +281,13 @@ export class CameraController {
   // ── Private Methods ───────────────────────────────────────────────
 
   private updateInput(deltaTime: number): void {
-    const heightFactor = this.camera.position.y / DEFAULT_CAMERA_HEIGHT;
+    const height = this.camera.position.y;
+    const heightFactor = height / DEFAULT_CAMERA_HEIGHT;
     const panSpeed = BASE_PAN_SPEED * Math.max(0.5, heightFactor);
-    const zoomSpeed = BASE_ZOOM_SPEED * Math.max(0.5, heightFactor);
+    // Logarithmic zoom: proportional to current height for natural feel
+    // At ground level (50), zoomSpeed ≈ 40; at max altitude (5000), zoomSpeed ≈ 800
+    const logFactor = Math.max(0.2, Math.log2(Math.max(1, height / MIN_ZOOM)));
+    const zoomSpeed = BASE_ZOOM_SPEED * logFactor * 0.5;
 
     // Pan acceleration/deceleration
     const panActive =
@@ -361,6 +371,22 @@ export class CameraController {
       );
 
       this.camera.position.copy(this.controls.target).addScaledVector(dir, newDist);
+    }
+  }
+
+  /**
+   * Dynamic FOV: wider at strategic zoom (60°), narrower at tactical (40°).
+   * Smooth lerp prevents jarring changes during zoom.
+   */
+  private updateDynamicFOV(): void {
+    const height = this.camera.position.y;
+    const t = Math.max(0, Math.min(1, (height - TACTICAL_HEIGHT) / (STRATEGIC_HEIGHT - TACTICAL_HEIGHT)));
+    const targetFov = lerp(FOV_TACTICAL, FOV_STRATEGIC, t);
+    const currentFov = this.camera.fov;
+    const newFov = currentFov + (targetFov - currentFov) * FOV_LERP_SPEED;
+    if (Math.abs(newFov - currentFov) > 0.01) {
+      this.camera.fov = newFov;
+      this.camera.updateProjectionMatrix();
     }
   }
 

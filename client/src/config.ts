@@ -56,7 +56,7 @@ export const MAX_AGENTS = 10_000;
 
 // ── Height ──────────────────────────────────────────────────────
 export const MAX_HEIGHT = 127;
-export const WATER_LEVEL = 20;
+export const WATER_LEVEL = 32;
 
 // ── Provinces ───────────────────────────────────────────────────
 export const PROVINCE_COUNT = 41;

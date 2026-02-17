@@ -12,14 +12,14 @@
  */
 
 import * as THREE from 'three';
-import { CHUNK_SIZE, GRID_SIZE, MAP_SIZE } from '../config';
+import { CHUNK_SIZE, GRID_SIZE, MAP_SIZE, LOD_TRANSITION_RANGE } from '../config';
 import type { ChunkData, ChunkMeshData, LODLevel } from '../types';
 import { makeChunkKey, type ChunkKey } from '../types';
 import { worldToChunk, spiralOrder, isChunkInBounds } from '../core/math';
 import { gameEvents } from '../core/eventBus';
 import { createLogger } from '../core/logger';
 import { generateProceduralChunk } from './proceduralChunk';
-import { buildChunkMesh } from './chunkMeshBuilder';
+import { greedyMeshChunk } from './greedyMesher';
 import { getCachedMesh, putCachedMesh, hashChunkData } from './meshCache';
 import { WorkerPool } from '../workers/workerPool';
 
@@ -44,14 +44,24 @@ export type ChunkDataProvider = (cx: number, cy: number) => ChunkData | null;
 /** Maximum chunks to initiate loading per update frame. */
 const LOAD_BUDGET_PER_FRAME = 2;
 
-/** Shared material for all terrain BatchedMeshes (vertex-colored, flat-shaded). */
-const CHUNK_MATERIAL = new THREE.MeshStandardMaterial({
-  vertexColors: true,
-  flatShading: true,
-  roughness: 0.95,
-  metalness: 0.02,
-  side: THREE.FrontSide,
-});
+/** Base material config for terrain BatchedMeshes (vertex-colored, flat-shaded). */
+function createChunkMaterial(): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    flatShading: true,
+    roughness: 0.95,
+    metalness: 0.02,
+    side: THREE.FrontSide,
+    transparent: true,
+    depthWrite: true,
+  });
+}
+
+/** LOD boundary distances in chunk units (matches getLOD thresholds). */
+const LOD_BOUNDARIES = [2, 5, 9] as const;
+
+/** Transition half-range in chunk units (~150 world units / 32 chunk size). */
+const LOD_BLEND_CHUNKS = LOD_TRANSITION_RANGE / CHUNK_SIZE;
 
 /**
  * Per-LOD buffer budgets. Each LOD level pre-allocates space in its
@@ -90,6 +100,9 @@ export class ChunkLoader {
 
   /** One BatchedMesh per LOD level. */
   private readonly batchedMeshes: Map<LODLevel, THREE.BatchedMesh> = new Map();
+
+  /** Per-LOD materials for alpha blending control. */
+  private readonly lodMaterials: Map<LODLevel, THREE.MeshStandardMaterial> = new Map();
 
   /** Currently loaded and visible chunks. */
   private loadedChunks: Map<ChunkKey, LoadedChunkEntry> = new Map();
@@ -156,14 +169,19 @@ export class ChunkLoader {
     const totalVerts = budget.maxChunks * budget.vertsPerChunk;
     const totalIndices = budget.maxChunks * budget.indicesPerChunk;
 
+    const mat = createChunkMaterial();
+    this.lodMaterials.set(lod, mat);
+
     const bm = new THREE.BatchedMesh(
       budget.maxChunks,
       totalVerts,
       totalIndices,
-      CHUNK_MATERIAL,
+      mat,
     );
     bm.name = `terrain_lod${lod}`;
     bm.frustumCulled = false; // We manage visibility per-instance
+    // Higher LODs render behind lower LODs for proper alpha layering
+    bm.renderOrder = lod;
     this.batchedMeshes.set(lod, bm);
     this.terrainGroup.add(bm);
   }
@@ -174,6 +192,9 @@ export class ChunkLoader {
     const tileX = cameraWorldX + MAP_SIZE / 2;
     const tileZ = cameraWorldZ + MAP_SIZE / 2;
     const { cx: cameraCx, cy: cameraCy } = worldToChunk(tileX, tileZ);
+
+    // Always run alpha blending for smooth transitions (lerp-based)
+    this.updateLODAlpha(cameraCx, cameraCy);
 
     if (cameraCx === this.lastCameraCx && cameraCy === this.lastCameraCy) {
       return;
@@ -214,6 +235,10 @@ export class ChunkLoader {
       bm.dispose();
     }
     this.batchedMeshes.clear();
+    for (const mat of this.lodMaterials.values()) {
+      mat.dispose();
+    }
+    this.lodMaterials.clear();
     this.terrainGroup.removeFromParent();
     log.info('Disposed');
   }
@@ -306,7 +331,7 @@ export class ChunkLoader {
     chunkData: ChunkData,
     dataHash: string,
   ): void {
-    const meshData = buildChunkMesh(chunkData, lod);
+    const meshData = greedyMeshChunk(chunkData, lod);
     putCachedMesh(cx, cy, lod, dataHash, meshData);
     this.onMeshReady(key, cx, cy, lod, meshData);
   }
@@ -394,12 +419,12 @@ export class ChunkLoader {
                 `Worker LOD rebuild failed for (${coords.cx},${coords.cy}), ` +
                 `falling back to sync: ${error instanceof Error ? error.message : String(error)}`,
               );
-              const syncMeshData = buildChunkMesh(chunkData, desiredLod);
+              const syncMeshData = greedyMeshChunk(chunkData, desiredLod);
               this.onLodMeshReady(key, coords.cx, coords.cy, desiredLod, syncMeshData);
             },
           );
         } else {
-          const meshData = buildChunkMesh(chunkData, desiredLod);
+          const meshData = greedyMeshChunk(chunkData, desiredLod);
           this.swapChunkLod(key, entry, coords.cx, coords.cy, desiredLod, meshData);
         }
       }
@@ -448,6 +473,52 @@ export class ChunkLoader {
     entry.instanceId = newEntry.instanceId;
 
     gameEvents.emit('lod_changed', { cx, cy, lod: newLod });
+  }
+
+  /**
+   * Update per-LOD material opacity for smooth alpha blending at LOD boundaries.
+   * Chunks near a LOD boundary get faded opacity to prevent hard pop-in.
+   */
+  private updateLODAlpha(cameraCx: number, cameraCy: number): void {
+    // Track min alpha needed per LOD (chunks closest to boundary)
+    const lodMinAlpha: Record<LODLevel, number> = { 0: 1, 1: 1, 2: 1, 3: 1 };
+    let hasTransition = false;
+
+    for (const [key, entry] of this.loadedChunks) {
+      const coords = parseKeyFast(key);
+      const dist = Math.max(
+        Math.abs(coords.cx - cameraCx),
+        Math.abs(coords.cy - cameraCy),
+      );
+
+      // Check distance to the nearest LOD boundary
+      for (const boundary of LOD_BOUNDARIES) {
+        const distToBoundary = Math.abs(dist - boundary);
+        if (distToBoundary < LOD_BLEND_CHUNKS) {
+          // In transition zone — compute fade factor
+          const t = distToBoundary / LOD_BLEND_CHUNKS;
+          // Chunks just past the boundary (higher LOD) fade in, chunks just before fade out
+          const alpha = dist > boundary
+            ? t           // fading in (just entered this LOD)
+            : t;          // fading out (about to leave this LOD)
+          lodMinAlpha[entry.lod] = Math.min(lodMinAlpha[entry.lod], alpha);
+          hasTransition = true;
+          break;
+        }
+      }
+    }
+
+    // Apply opacity to LOD materials
+    for (const lod of [0, 1, 2, 3] as LODLevel[]) {
+      const mat = this.lodMaterials.get(lod);
+      if (!mat) continue;
+      // Smooth alpha: min 0.3 to avoid fully invisible chunks during transition
+      const targetAlpha = hasTransition ? Math.max(0.3, lodMinAlpha[lod]) : 1.0;
+      mat.opacity = mat.opacity + (targetAlpha - mat.opacity) * 0.15;
+      // Disable transparency when fully opaque for better performance
+      mat.transparent = mat.opacity < 0.99;
+      mat.depthWrite = mat.opacity >= 0.5;
+    }
   }
 
   private getLOD(chunkDistance: number): LODLevel {

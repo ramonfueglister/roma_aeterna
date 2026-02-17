@@ -185,6 +185,47 @@ function getProvince(provinces: Uint8Array, lx: number, lz: number): number {
   return provinces[lz * CHUNK_SIZE + lx] ?? 0;
 }
 
+// ── Ambient Occlusion ──────────────────────────────────────────────
+
+/**
+ * AO darkening factor for per-vertex ambient occlusion.
+ * 1.0 = no occlusion, lower = darker.  The factor is multiplied into
+ * vertex color after face shading.
+ */
+const AO_STRENGTH = 0.78;
+
+/**
+ * Compute per-vertex AO for a top-face corner.
+ *
+ * For a corner at local (lx, lz), check the 3 neighboring columns
+ * that share this corner: side1, side2, and the diagonal.  If any
+ * neighbor is taller than the current column height, that neighbor
+ * occludes the corner.
+ *
+ * Returns a multiplier in [AO_STRENGTH, 1.0] where lower = more
+ * occluded.
+ *
+ * See: https://0fps.net/2013/07/03/ambient-occlusion-for-minecraft-like-worlds/
+ */
+function computeTopFaceAO(
+  heights: Uint8Array,
+  lx: number, lz: number,
+  cornerHeight: number,
+  dxSide1: number, dzSide1: number,
+  dxSide2: number, dzSide2: number,
+): number {
+  const s1 = getHeight(heights, lx + dxSide1, lz + dzSide1) > cornerHeight ? 1 : 0;
+  const s2 = getHeight(heights, lx + dxSide2, lz + dzSide2) > cornerHeight ? 1 : 0;
+  // If both sides occlude, the diagonal is irrelevant (fully occluded corner)
+  const corner = s1 === 1 && s2 === 1
+    ? 1
+    : (getHeight(heights, lx + dxSide1 + dxSide2, lz + dzSide1 + dzSide2) > cornerHeight ? 1 : 0);
+
+  const occluders = s1 + s2 + corner; // 0..3
+  // Map 0 → 1.0, 1 → lerp, 2 → lerp, 3 → AO_STRENGTH
+  return 1.0 - (occluders / 3) * (1.0 - AO_STRENGTH);
+}
+
 // ── Quad Emitter ───────────────────────────────────────────────────
 
 /** Current vertex count tracker -- reset per mesh build. */
@@ -200,6 +241,8 @@ let vertexCount = 0;
  *   v3 ---- v2
  *
  * Triangles: (v0, v3, v1), (v1, v3, v2)  -- CCW when viewed from outside.
+ *
+ * ao0..ao3 are per-vertex AO multipliers (1.0 = no occlusion).
  */
 function emitQuad(
   x0: number, y0: number, z0: number,
@@ -211,6 +254,7 @@ function emitQuad(
   biome: number,
   provinceId: number,
   distToBorder: number,
+  ao0 = 1.0, ao1 = 1.0, ao2 = 1.0, ao3 = 1.0,
 ): void {
   const base = vertexCount;
 
@@ -220,12 +264,10 @@ function emitQuad(
   const sg = bg * shade;
   const sb = bb * shade;
 
-  // Per-vertex: noise -> empire border fog -> map edge fade
-  // Empire border fog uses the source tile's province info (same for all verts).
-  // Map edge fade uses each vertex's world XZ position for per-vertex gradient.
+  // Per-vertex: AO -> noise -> empire border fog -> map edge fade
 
   // Vertex 0
-  let [r0, g0, b0] = applyColorNoise(sr, sg, sb, x0, y0, z0);
+  let [r0, g0, b0] = applyColorNoise(sr * ao0, sg * ao0, sb * ao0, x0, y0, z0);
   [r0, g0, b0] = applyEmpireBorderFog(r0, g0, b0, provinceId, distToBorder);
   [r0, g0, b0] = applyMapEdgeFade(r0, g0, b0, x0, z0);
   scratchPositions.push3(x0, y0, z0);
@@ -233,7 +275,7 @@ function emitQuad(
   scratchColors.push3(r0, g0, b0);
 
   // Vertex 1
-  let [r1, g1, b1] = applyColorNoise(sr, sg, sb, x1, y1, z1);
+  let [r1, g1, b1] = applyColorNoise(sr * ao1, sg * ao1, sb * ao1, x1, y1, z1);
   [r1, g1, b1] = applyEmpireBorderFog(r1, g1, b1, provinceId, distToBorder);
   [r1, g1, b1] = applyMapEdgeFade(r1, g1, b1, x1, z1);
   scratchPositions.push3(x1, y1, z1);
@@ -241,7 +283,7 @@ function emitQuad(
   scratchColors.push3(r1, g1, b1);
 
   // Vertex 2
-  let [r2, g2, b2] = applyColorNoise(sr, sg, sb, x2, y2, z2);
+  let [r2, g2, b2] = applyColorNoise(sr * ao2, sg * ao2, sb * ao2, x2, y2, z2);
   [r2, g2, b2] = applyEmpireBorderFog(r2, g2, b2, provinceId, distToBorder);
   [r2, g2, b2] = applyMapEdgeFade(r2, g2, b2, x2, z2);
   scratchPositions.push3(x2, y2, z2);
@@ -249,7 +291,7 @@ function emitQuad(
   scratchColors.push3(r2, g2, b2);
 
   // Vertex 3
-  let [r3, g3, b3] = applyColorNoise(sr, sg, sb, x3, y3, z3);
+  let [r3, g3, b3] = applyColorNoise(sr * ao3, sg * ao3, sb * ao3, x3, y3, z3);
   [r3, g3, b3] = applyEmpireBorderFog(r3, g3, b3, provinceId, distToBorder);
   [r3, g3, b3] = applyMapEdgeFade(r3, g3, b3, x3, z3);
   scratchPositions.push3(x3, y3, z3);
@@ -355,6 +397,27 @@ function mergeTopFaces(
       const pid = getProvince(provinces, lx, lz);
       const dBorder = distToBarbarianInChunk(provinces, lx, lz);
 
+      // Per-vertex AO for top face corners.
+      // For each corner, check the 3 neighbors that meet at that corner.
+      // Tile coords of the 4 corners of the merged quad:
+      const nwX = gx * step;              // NW corner tile X
+      const nwZ = gz * step;              // NW corner tile Z
+      const neX = (gx + w - 1) * step;    // NE corner tile X
+      const neZ = gz * step;              // NE corner tile Z
+      const seX = (gx + w - 1) * step;    // SE corner tile X
+      const seZ = (gz + d - 1) * step;    // SE corner tile Z
+      const swX = gx * step;              // SW corner tile X
+      const swZ = (gz + d - 1) * step;    // SW corner tile Z
+
+      // v0 (NW): side1=(-step,0), side2=(0,-step)
+      const ao0 = computeTopFaceAO(heights, nwX, nwZ, height, -step, 0, 0, -step);
+      // v1 (NE): side1=(+step,0), side2=(0,-step)
+      const ao1 = computeTopFaceAO(heights, neX, neZ, height, step, 0, 0, -step);
+      // v2 (SE): side1=(+step,0), side2=(0,+step)
+      const ao2 = computeTopFaceAO(heights, seX, seZ, height, step, 0, 0, step);
+      // v3 (SW): side1=(-step,0), side2=(0,+step)
+      const ao3 = computeTopFaceAO(heights, swX, swZ, height, -step, 0, 0, step);
+
       // Top face: Y-up, corners at height wy
       // v0=NW, v1=NE, v2=SE, v3=SW  (viewed from above, CCW)
       emitQuad(
@@ -367,6 +430,7 @@ function mergeTopFaces(
         biome,
         pid,
         dBorder,
+        ao0, ao1, ao2, ao3,
       );
     }
   }
@@ -536,6 +600,10 @@ function emitSideQuad(
 ): void {
   // Each face direction has specific corner positions to ensure outward-facing
   // CCW winding order.
+  //
+  // Side-face AO: the top edge (v0, v1 at yTop) gets subtle darkening where
+  // the side meets the top surface — a concave edge that traps light.
+  const sideAO = AO_STRENGTH + (1.0 - AO_STRENGTH) * 0.5; // softer than full AO
 
   switch (face) {
     case FaceDir.NORTH: {
@@ -548,6 +616,7 @@ function emitSideQuad(
         wx,             yBot, z,   // v2
         wx + spanWorld, yBot, z,   // v3
         nx, ny, nz, shade, biome, provinceId, distToBorder,
+        sideAO, sideAO, 1.0, 1.0,
       );
       break;
     }
@@ -561,6 +630,7 @@ function emitSideQuad(
         wx + spanWorld, yBot, z,   // v2
         wx,             yBot, z,   // v3
         nx, ny, nz, shade, biome, provinceId, distToBorder,
+        sideAO, sideAO, 1.0, 1.0,
       );
       break;
     }
@@ -574,6 +644,7 @@ function emitSideQuad(
         x, yBot, wz + spanWorld,   // v2
         x, yBot, wz,               // v3
         nx, ny, nz, shade, biome, provinceId, distToBorder,
+        sideAO, sideAO, 1.0, 1.0,
       );
       break;
     }
@@ -587,6 +658,7 @@ function emitSideQuad(
         x, yBot, wz,               // v2
         x, yBot, wz + spanWorld,   // v3
         nx, ny, nz, shade, biome, provinceId, distToBorder,
+        sideAO, sideAO, 1.0, 1.0,
       );
       break;
     }

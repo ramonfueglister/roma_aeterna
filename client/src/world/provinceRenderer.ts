@@ -139,6 +139,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uBorderWidth;
   uniform float uFillAlpha;
   uniform float uTime;
+  uniform float uBorderGlow;
 
   varying vec2 vUv;
   varying vec3 vWorldPos;
@@ -183,13 +184,22 @@ const FRAGMENT_SHADER = /* glsl */ `
       discard;
     }
 
-    // ── Border detection (4-neighbour comparison) ───────────────
-    float idN = floor(sampleId(vUv, vec2( 0.0,  uBorderWidth)) + 0.5);
-    float idS = floor(sampleId(vUv, vec2( 0.0, -uBorderWidth)) + 0.5);
-    float idE = floor(sampleId(vUv, vec2( uBorderWidth,  0.0)) + 0.5);
-    float idW = floor(sampleId(vUv, vec2(-uBorderWidth,  0.0)) + 0.5);
+    // ── Border detection (multi-sample distance field) ──────────
+    // Sample 8 neighbors at varying distances for smooth border detection
+    float borderDist = 999.0;
+    for (int i = -2; i <= 2; i++) {
+      for (int j = -2; j <= 2; j++) {
+        if (i == 0 && j == 0) continue;
+        float nId = floor(sampleId(vUv, vec2(float(i), float(j)) * uBorderWidth * 0.5) + 0.5);
+        if (nId != id) {
+          float d = length(vec2(float(i), float(j)));
+          borderDist = min(borderDist, d);
+        }
+      }
+    }
 
-    bool isBorder = (idN != id) || (idS != id) || (idE != id) || (idW != id);
+    // Distance-based border alpha with soft gradient falloff
+    float borderAlpha = 1.0 - smoothstep(0.0, 3.0, borderDist);
 
     // ── Province colour lookup ──────────────────────────────────
     vec4 provColor = getProvinceColor(id);
@@ -207,21 +217,28 @@ const FRAGMENT_SHADER = /* glsl */ `
     }
 
     // ── Compose final colour ────────────────────────────────────
-    vec3 fillColor   = provColor.rgb;
-    // Bright border for bloom pickup (1.3x province color)
-    vec3 borderColor = provColor.rgb * 1.3;
+    vec3 fillColor = provColor.rgb;
+
+    // Glow border color: 1.5x province color for bloom pickup
+    vec3 borderColor = provColor.rgb * 1.5;
+    // Add subtle emissive warm glow scaled by glow intensity
+    borderColor += vec3(0.15, 0.1, 0.05) * borderAlpha * uBorderGlow;
 
     float alpha = 0.0;
     vec3 color  = vec3(0.0);
 
-    if (isBorder) {
+    if (borderAlpha > 0.01) {
       // Borders visible from tactical height upward
-      color = borderColor;
       // Thicker appearance at higher altitudes, thin at tactical
-      float borderAlpha = mix(0.5, 0.85, fillFactor);
+      float heightBorderAlpha = mix(0.5, 0.85, fillFactor);
       // Subtle pulse animation on border brightness
       float pulse = 0.9 + 0.1 * sin(uTime * 1.2);
-      alpha = borderAlpha * borderFactor * pulse;
+      float finalBorderAlpha = borderAlpha * heightBorderAlpha * borderFactor * pulse;
+
+      // Blend fill behind the border gradient
+      float fillAlphaHere = uFillAlpha * fillFactor;
+      color = mix(fillColor, borderColor, borderAlpha);
+      alpha = max(finalBorderAlpha, fillAlphaHere);
     } else {
       // Fill only at strategic height
       color = fillColor;
@@ -314,6 +331,7 @@ export class ProvinceRenderer {
         uBorderWidth:    { value: 2.0 },
         uFillAlpha:      { value: 0.30 },
         uTime:           { value: 0.0 },
+        uBorderGlow:     { value: 1.0 },
       },
     });
 

@@ -16,6 +16,7 @@ import {
   CitySystem,
   TreeSystem,
   TextLabelSystem,
+  RoadSystem,
   AgentSystem,
   ParticleSystemWrapper,
   PostProcessingSystem,
@@ -63,6 +64,7 @@ async function init(): Promise<void> {
   engine.register(new CitySystem());
   engine.register(new TreeSystem());
   engine.register(new TextLabelSystem());
+  engine.register(new RoadSystem());
   engine.register(new AgentSystem());
   engine.register(new ParticleSystemWrapper());
   engine.register(new PostProcessingSystem());

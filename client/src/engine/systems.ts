@@ -24,6 +24,7 @@ import { TextLabelRenderer } from '../world/textLabels';
 import { CITY_DATABASE } from '../world/cityDatabase';
 import { AgentRenderer } from '../world/agentRenderer';
 import { ParticleSystem } from '../world/particleSystem';
+import { RoadRenderer } from '../world/roadRenderer';
 import { getHeightmapData, hasHeightmap } from '../world/heightmapLoader';
 
 // ── Base ──────────────────────────────────────────────────────────
@@ -217,6 +218,26 @@ export class TextLabelSystem extends BaseSystem {
   protected onInit(engine: Engine): void {
     this.renderer = new TextLabelRenderer(engine.scene);
     this.renderer.setCities([...CITY_DATABASE]);
+  }
+
+  update(): void {
+    const cam = this.engine.camera.position;
+    this.renderer.update(cam.y, cam.x, cam.z);
+  }
+
+  dispose(): void {
+    this.renderer.dispose();
+  }
+}
+
+// ── Roads & Trade Routes ─────────────────────────────────────────
+
+export class RoadSystem extends BaseSystem {
+  readonly name = 'roads';
+  renderer!: RoadRenderer;
+
+  protected onInit(engine: Engine): void {
+    this.renderer = new RoadRenderer(engine.scene);
   }
 
   update(): void {

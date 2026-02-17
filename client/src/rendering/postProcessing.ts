@@ -23,8 +23,8 @@ const VignetteShader = {
 
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    intensity: { value: 0.4 },
-    smoothness: { value: 0.5 },
+    intensity: { value: 0.45 },
+    smoothness: { value: 0.55 },
   },
 
   vertexShader: /* glsl */ `
@@ -66,10 +66,10 @@ const ColorGradingShader = {
 
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    saturation: { value: 0.85 },
-    lift: { value: new THREE.Vector3(0.04, 0.03, 0.01) },    // warm amber shadows
-    gamma: { value: new THREE.Vector3(1.02, 1.0, 0.96) },    // slight warm midtones
-    gain: { value: new THREE.Vector3(1.04, 1.02, 0.94) },    // golden highlights
+    saturation: { value: 0.88 },
+    lift: { value: new THREE.Vector3(0.05, 0.035, 0.01) },   // warm amber shadows (stronger)
+    gamma: { value: new THREE.Vector3(1.03, 1.0, 0.94) },    // warmer midtones
+    gain: { value: new THREE.Vector3(1.06, 1.03, 0.92) },    // golden highlights (Imperator Rome style)
   },
 
   vertexShader: /* glsl */ `
@@ -386,9 +386,9 @@ export class PostProcessingPipeline {
     const renderSize = renderer.getSize(new THREE.Vector2());
     this.bloomPass = new UnrealBloomPass(
       renderSize,   // resolution
-      0.3,          // strength - subtle warm glow
-      0.5,          // radius - soft spread
-      0.75,         // threshold - lowered for province border glow
+      0.35,         // strength - warm golden-hour glow
+      0.6,          // radius - soft spread for province borders
+      0.70,         // threshold - catch province border glow + water specular
     );
     this.composer.addPass(this.bloomPass);
 
