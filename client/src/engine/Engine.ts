@@ -19,7 +19,11 @@
  */
 
 import * as THREE from 'three';
-import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
+// Import from three/webgpu (NOT the deep path three/src/renderers/webgpu/WebGPURenderer.js).
+// Deep-path imports cause Vite to split Three.js into separate pre-bundled chunks,
+// duplicating module-level singletons like TSL's currentStack. This duplication
+// makes positionLocal.assign() crash with "Cannot read properties of null".
+import { WebGPURenderer } from 'three/webgpu';
 import { APP_NAME, CAMERA_FOV, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAX_PIXEL_RATIO, NEAR_CLIP } from '../config';
 import { perfMonitor } from '../core/perfMonitor';
 import { createLogger } from '../core/logger';
