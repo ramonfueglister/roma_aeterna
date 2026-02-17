@@ -225,10 +225,10 @@ export class ChunkLoader {
   }
 
   dispose(): void {
-    for (const [key, entry] of this.loadedChunks) {
+    for (const [, entry] of this.loadedChunks) {
       this.removeFromBatch(entry);
-      this.loadedChunks.delete(key);
     }
+    this.loadedChunks.clear();
     this.pendingLoads.clear();
 
     for (const bm of this.batchedMeshes.values()) {
@@ -500,7 +500,7 @@ export class ChunkLoader {
           // Chunks just past the boundary (higher LOD) fade in, chunks just before fade out
           const alpha = dist > boundary
             ? t           // fading in (just entered this LOD)
-            : t;          // fading out (about to leave this LOD)
+            : 1 - t;      // fading out (about to leave this LOD)
           lodMinAlpha[entry.lod] = Math.min(lodMinAlpha[entry.lod], alpha);
           hasTransition = true;
           break;
@@ -588,6 +588,12 @@ export class ChunkLoader {
   private removeFromBatch(entry: LoadedChunkEntry): void {
     const bm = this.batchedMeshes.get(entry.lod);
     if (!bm) return;
+
+    try {
+      bm.deleteInstance(entry.instanceId);
+    } catch {
+      // Instance may have already been removed
+    }
 
     try {
       bm.deleteGeometry(entry.geometryId);

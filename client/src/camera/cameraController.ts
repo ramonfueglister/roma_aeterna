@@ -105,6 +105,7 @@ export class CameraController {
   private readonly boundMouseMove: (e: MouseEvent) => void;
 
   // Scratch vectors to avoid per-frame allocations
+  private static readonly _UP = new THREE.Vector3(0, 1, 0);
   private readonly _forward = new THREE.Vector3();
   private readonly _right = new THREE.Vector3();
   private readonly _offset = new THREE.Vector3();
@@ -344,7 +345,7 @@ export class CameraController {
     if (Math.abs(this.input.rotateVelocity) > 0.001) {
       const angle = this.input.rotateVelocity * BASE_ROTATION_SPEED * deltaTime;
       this._offset.subVectors(this.camera.position, this.controls.target);
-      this._offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+      this._offset.applyAxisAngle(CameraController._UP, angle);
       this.camera.position.copy(this.controls.target).add(this._offset);
     }
 
@@ -491,20 +492,19 @@ export class CameraController {
         y: this.camera.position.y,
         z: this.camera.position.z,
       });
-    }
 
-    const vp = this.getViewportRect();
-    const vpChanged =
-      !this.lastViewportRect ||
-      vp.minCx !== this.lastViewportRect.minCx ||
-      vp.maxCx !== this.lastViewportRect.maxCx ||
-      vp.minCy !== this.lastViewportRect.minCy ||
-      vp.maxCy !== this.lastViewportRect.maxCy;
+      const vp = this.getViewportRect();
+      const vpChanged =
+        !this.lastViewportRect ||
+        vp.minCx !== this.lastViewportRect.minCx ||
+        vp.maxCx !== this.lastViewportRect.maxCx ||
+        vp.minCy !== this.lastViewportRect.minCy ||
+        vp.maxCy !== this.lastViewportRect.maxCy;
 
-    if (vpChanged) {
-      this.lastViewportRect = vp;
-      this.lastEventTime = now;
-      gameEvents.emit('viewport_changed', vp);
+      if (vpChanged) {
+        this.lastViewportRect = vp;
+        gameEvents.emit('viewport_changed', vp);
+      }
     }
   }
 
