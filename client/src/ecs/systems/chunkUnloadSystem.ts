@@ -1,8 +1,11 @@
 /**
  * System #7: ChunkUnloadSystem
  *
- * Removes chunks outside the viewport, disposes geometry,
- * recycles entities.
+ * Currently a no-op. Chunk unloading is handled internally by
+ * ChunkLoader.unloadDistantChunks() called from ChunkLoader.update().
+ *
+ * This system exists as a placeholder for future ECS-native chunk
+ * lifecycle management.
  *
  * Frequency: every 500ms
  */
@@ -16,7 +19,5 @@ export function chunkUnloadSystem(_world: World, delta: number): void {
   if (_accumulator < 0.5) return;
   _accumulator -= 0.5;
 
-  // Stub: will check chunks outside viewport range,
-  // dispose BatchedMesh geometry, removeEntity.
-  // Implementation in Phase 3 (chunk pipeline).
+  // ChunkLoader.unloadDistantChunks() handles unloading internally.
 }

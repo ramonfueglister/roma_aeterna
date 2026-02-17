@@ -5,12 +5,17 @@
  * via engine.register(). The engine owns the Three.js renderer, scene,
  * camera, and the render loop. Subsystems receive init/update/dispose
  * calls in registration order.
+ *
+ * The ECS pipeline runs first each frame (via runPipeline), then
+ * GameSystems update. During migration, both coexist. Once all
+ * GameSystems are migrated, only the ECS pipeline will remain.
  */
 
 import * as THREE from 'three';
 import { APP_NAME, CAMERA_FOV, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAX_PIXEL_RATIO, NEAR_CLIP } from '../config';
 import { perfMonitor } from '../core/perfMonitor';
 import { createLogger } from '../core/logger';
+import { world, runPipeline } from '../ecs';
 
 const log = createLogger('Engine');
 
@@ -145,6 +150,10 @@ export class Engine {
     const deltaTime = this.clock.getDelta();
     const elapsed = this.clock.getElapsedTime();
 
+    // Run ECS pipeline first (camera sync, viewport, visibility, etc.)
+    runPipeline(world, deltaTime);
+
+    // Then run GameSystems (renderers that still own their logic)
     for (const system of this.systems) {
       system.update(deltaTime, elapsed);
     }

@@ -43,3 +43,21 @@ export {
   CityTier, CityLODMode, TreeSpecies,
   ResourceType, HarvestState, InstancePool,
 } from './enums';
+
+// MeshRegistry
+export {
+  registerBatchedMesh, getBatchedMesh, unregisterBatchedMesh,
+  registerInstancePool, getInstancePool, unregisterInstancePool,
+  allocateInstance, releaseInstance, getActiveInstanceCount,
+  clearMeshRegistry,
+} from './meshRegistry';
+
+// System configuration setters (called by Engine during init)
+export { setCameraRef } from './systems/cameraInputSystem';
+export { setChunkLoaderRef, getChunkLoaderRef } from './systems/chunkLoadSystem';
+export { setCityRendererRef } from './systems/cityLODSystem';
+export { setTreeRendererRef } from './systems/treeRenderSystem';
+export { setAgentRendererRef } from './systems/agentRenderSystem';
+export { setLabelRendererRef } from './systems/labelSystem';
+export { setProvinceRendererRef } from './systems/provinceOverlaySystem';
+export { getViewport, getCameraHeight, getCameraWorldX, getCameraWorldZ } from './systems/viewportSystem';
