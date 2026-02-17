@@ -49,14 +49,25 @@ vi.mock('three', () => {
   };
 });
 
-// Mock chunkMeshBuilder before importing ChunkLoader
-vi.mock('../world/chunkMeshBuilder', () => ({
-  buildChunkMesh: vi.fn(() => ({
+// Mock greedyMesher (ChunkLoader uses greedyMeshChunk, not buildChunkMesh)
+vi.mock('../world/greedyMesher', () => ({
+  greedyMeshChunk: vi.fn(() => ({
     positions: new Float32Array(12),
     normals: new Float32Array(12),
     colors: new Float32Array(12),
     indices: new Uint32Array(6),
   })),
+}));
+
+// Mock proceduralChunk (default chunkDataProvider)
+vi.mock('../world/proceduralChunk', () => ({
+  generateProceduralChunk: vi.fn(() => null),
+}));
+
+// Mock meshRegistry to prevent ECS side effects
+vi.mock('../ecs/meshRegistry', () => ({
+  registerBatchedMesh: vi.fn(),
+  unregisterBatchedMesh: vi.fn(),
 }));
 
 // Mock meshCache to resolve synchronously in tests
@@ -89,7 +100,7 @@ vi.mock('../core/eventBus', () => ({
 
 import * as THREE from 'three';
 import { ChunkLoader } from '../world/chunkLoader';
-import { buildChunkMesh } from '../world/chunkMeshBuilder';
+import { greedyMeshChunk } from '../world/greedyMesher';
 import { BiomeType, type ChunkData } from '../types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -258,11 +269,11 @@ describe('ChunkLoader', () => {
       expect(smallLoader.loadedCount).toBeGreaterThan(0);
     });
 
-    it('calls buildChunkMesh for each loaded chunk', async () => {
+    it('calls greedyMeshChunk for each loaded chunk', async () => {
       await updateNTimes(loader, 3, 0, 0);
 
-      expect(buildChunkMesh).toHaveBeenCalled();
-      expect(vi.mocked(buildChunkMesh).mock.calls.length).toBeGreaterThan(0);
+      expect(greedyMeshChunk).toHaveBeenCalled();
+      expect(vi.mocked(greedyMeshChunk).mock.calls.length).toBeGreaterThan(0);
     });
   });
 
@@ -469,10 +480,10 @@ describe('ChunkLoader', () => {
       };
     });
 
-    it('passes LOD level to buildChunkMesh based on distance', async () => {
+    it('passes LOD level to greedyMeshChunk based on distance', async () => {
       await updateNTimes(loader, 10, 0, 0);
 
-      const calls = vi.mocked(buildChunkMesh).mock.calls;
+      const calls = vi.mocked(greedyMeshChunk).mock.calls;
       expect(calls.length).toBeGreaterThan(0);
 
       calls.forEach(call => {
@@ -486,7 +497,7 @@ describe('ChunkLoader', () => {
     it('uses lower LOD (0) for nearby chunks', async () => {
       await updateNTimes(loader, 5, 0, 0);
 
-      const calls = vi.mocked(buildChunkMesh).mock.calls;
+      const calls = vi.mocked(greedyMeshChunk).mock.calls;
       const hasLod0 = calls.some(call => call[1] === 0);
       expect(hasLod0).toBe(true);
     });
