@@ -24,6 +24,7 @@
 import * as THREE from 'three';
 import { MAP_SIZE, WATER_LEVEL } from '../config';
 import { CITY_DATABASE } from './cityDatabase';
+import { sampleHeight, hasHeightmap } from './heightmapLoader';
 import type { CityData } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -36,8 +37,11 @@ const ROAD_MAX_DISTANCE = 200;
 /** Maximum tile distance between port cities to create a sea route. */
 const SEA_ROUTE_MAX_DISTANCE = 400;
 
-/** Y position for land roads (slightly above average terrain). */
-const ROAD_Y = 40;
+/** Fallback Y for land roads when heightmap is not available. */
+const ROAD_Y_FALLBACK = 40;
+
+/** Small offset above terrain to prevent z-fighting. */
+const ROAD_HEIGHT_OFFSET = 2;
 
 /** Y position for sea routes (at water surface). */
 const SEA_ROUTE_Y = WATER_LEVEL - 1;
@@ -74,9 +78,17 @@ interface CityEdge {
 // Road/Route Generation
 // ---------------------------------------------------------------------------
 
+/** Get terrain height at tile coordinates, with offset above surface. */
+function terrainY(tileX: number, tileY: number): number {
+  if (!hasHeightmap()) return ROAD_Y_FALLBACK;
+  const h = sampleHeight(tileX, tileY);
+  return (h ?? ROAD_Y_FALLBACK) + ROAD_HEIGHT_OFFSET;
+}
+
 /**
  * Build land road edges between cities within ROAD_MAX_DISTANCE tile units.
  * Uses squared distance to avoid sqrt per pair.
+ * Roads follow terrain height at each endpoint.
  */
 function generateRoadEdges(cities: readonly CityData[]): CityEdge[] {
   const edges: CityEdge[] = [];
@@ -94,10 +106,10 @@ function generateRoadEdges(cities: readonly CityData[]): CityEdge[] {
         edges.push({
           ax: a.tileX - HALF_MAP,
           az: a.tileY - HALF_MAP,
-          ay: ROAD_Y,
+          ay: terrainY(a.tileX, a.tileY),
           bx: b.tileX - HALF_MAP,
           bz: b.tileY - HALF_MAP,
-          by: ROAD_Y,
+          by: terrainY(b.tileX, b.tileY),
         });
       }
     }

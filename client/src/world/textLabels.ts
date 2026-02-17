@@ -21,6 +21,7 @@ import * as THREE from 'three';
 import { Text } from 'troika-three-text';
 import type { CityData, CityTier } from '../types';
 import { MAP_SIZE } from '../config';
+import { sampleHeight, hasHeightmap } from './heightmapLoader';
 
 // ---------------------------------------------------------------------------
 // Troika Text type shim (minimal surface used by this module)
@@ -158,12 +159,14 @@ export class TextLabelRenderer {
    * Call once after city data is loaded (or again if cities change).
    */
   setCities(cities: CityData[]): void {
+    const useHm = hasHeightmap();
     this.cityEntries = cities.map((city): LabelEntry => {
       const tierKey = `city${city.tier}` as 'city1' | 'city2' | 'city3' | 'city4';
+      const terrainH = useHm ? (sampleHeight(city.tileX, city.tileY) ?? 0) : 0;
       return {
         text: city.latinName || city.name,
         worldX: city.tileX - HALF_MAP,
-        worldY: CITY_LABEL_Y_OFFSET,
+        worldY: terrainH + CITY_LABEL_Y_OFFSET,
         worldZ: city.tileY - HALF_MAP,
         importance: IMPORTANCE_WEIGHTS[tierKey],
         isProvince: false,

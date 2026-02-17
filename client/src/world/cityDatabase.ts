@@ -15,6 +15,7 @@ import { MAP_SIZE } from '../config';
 import type { CityData, CityTier, CultureType } from '../types';
 import { BuildingRenderer, generateCityLayout } from './buildingGenerator';
 import type { PlacedBuilding } from './buildingGenerator';
+import { sampleHeight, hasHeightmap } from './heightmapLoader';
 
 // ── Coordinate helpers ──────────────────────────────────────────
 
@@ -568,12 +569,16 @@ export class CityRenderer {
     this.allCities = CITY_DATABASE;
     this.buildingRenderer = new BuildingRenderer(scene);
 
-    // Pre-compute world positions
+    // Pre-compute world positions (terrain-aware Y when heightmap available)
+    const useHeightmap = hasHeightmap();
     const positions = new Map<string, THREE.Vector3>();
     for (const c of this.allCities) {
+      const y = useHeightmap
+        ? (sampleHeight(c.tileX, c.tileY) ?? MARKER_Y) + 2
+        : MARKER_Y;
       positions.set(c.id, new THREE.Vector3(
         c.tileX - HALF_MAP,
-        MARKER_Y,
+        y,
         c.tileY - HALF_MAP,
       ));
     }
