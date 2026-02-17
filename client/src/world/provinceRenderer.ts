@@ -298,12 +298,11 @@ export class ProvinceRenderer {
         fillAlphaHere,
       ).mul(fadeFactor);
 
-      // Barbarian territory: subtle dark overlay
+      // Barbarian territory (Province-ID 0): no province overlay.
+      // Spec §1/§21: barbarian desaturation is baked into vertex colors at mesh time.
       const isBarbarian = id.lessThan(0.5);
-      const barbAlpha = float(0.08).mul(fillFactor).mul(fadeFactor);
-
-      const finalColor = select(isBarbarian, vec3(0.0), color);
-      const finalAlpha = select(isBarbarian, barbAlpha, alpha);
+      const finalColor = select(isBarbarian, color, color);
+      const finalAlpha = select(isBarbarian, float(0.0), alpha);
 
       return vec4(finalColor, finalAlpha);
     });

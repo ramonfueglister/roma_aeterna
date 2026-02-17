@@ -61,25 +61,26 @@ export class PostProcessingPipeline {
 
   // ── Uniforms (reactive -- changing .value auto-updates the shader) ──
 
-  // Bloom
-  private readonly _bloomStrength = uniform(0.35);
-  private readonly _bloomRadius = uniform(0.6);
-  private readonly _bloomThreshold = uniform(0.58);
+  // Bloom (spec §21: strength 0.15, radius 0.4, threshold 0.85)
+  private readonly _bloomStrength = uniform(0.15);
+  private readonly _bloomRadius = uniform(0.4);
+  private readonly _bloomThreshold = uniform(0.85);
 
-  // Vignette
-  private readonly _vignetteIntensity = uniform(0.45);
-  private readonly _vignetteSmoothness = uniform(0.65);
+  // Vignette (spec §21: intensity 0.25, smoothness 0.8)
+  private readonly _vignetteIntensity = uniform(0.25);
+  private readonly _vignetteSmoothness = uniform(0.8);
 
-  // Color Grading
-  private readonly _saturation = uniform(0.88);
-  private readonly _lift = uniform(new THREE.Vector3(0.05, 0.035, 0.01));
-  private readonly _gamma = uniform(new THREE.Vector3(1.03, 1.0, 0.94));
-  private readonly _gain = uniform(new THREE.Vector3(1.06, 1.03, 0.92));
+  // Color Grading (spec §21: saturation 0.85, warmth +0.08, contrast 1.05,
+  // shadows tinted (30,25,50), highlights tinted (255,240,210))
+  private readonly _saturation = uniform(0.85);
+  private readonly _lift = uniform(new THREE.Vector3(0.03, 0.025, 0.05));   // cool purple shadow tint
+  private readonly _gamma = uniform(new THREE.Vector3(1.0 / 1.05, 1.0 / 1.05, 1.0 / 1.05)); // contrast 1.05
+  private readonly _gain = uniform(new THREE.Vector3(1.08, 1.04, 0.96));    // warm golden highlight tint
 
-  // Tilt-Shift
+  // Tilt-Shift (spec §21: bokeh 2.0 detail, 0.5 tactical, 0 regional+)
   private readonly _focusCenter = uniform(0.4);
   private readonly _focusWidth = uniform(0.3);
-  private readonly _blurAmount = uniform(2.0);
+  private readonly _blurAmount = uniform(0.0);
 
   // Parchment Overlay
   private readonly _cameraHeight = uniform(0.0);
@@ -245,39 +246,25 @@ export class PostProcessingPipeline {
   /**
    * Parchment overlay: procedural noise blended over the scene
    * using multiply blend for an antique map feel.
-   * Fades in at camera heights above 2000, max opacity 0.25 at 5000+.
+   * Fades in at camera heights above 2000, max opacity 0.15 at 5000+ (spec §21).
    */
   private buildParchmentOverlay(inputColor: Node): Node {
     const cameraHeightU = this._cameraHeight;
 
     const parchmentFn = Fn(([color]: [Node]) => {
-      // Opacity: 0 at height <= 2000, 0.25 at height >= 5000
-      const opacity = smoothstep(float(2000.0), float(5000.0), cameraHeightU).mul(0.25);
+      // Opacity: 0 at height <= 2000, 0.15 at height >= 5000 (spec §21)
+      const opacity = smoothstep(float(2000.0), float(5000.0), cameraHeightU).mul(0.15);
 
-      // Generate procedural parchment noise using MaterialX FBM
-      // Tile at 512px equivalent spacing
+      // Simple parchment noise (spec §21: "single 512x512 seamless parchment noise texture")
+      // Use single-octave FBM to keep GPU cost minimal (~0.2ms budget)
       const noiseCoord = screenUV.mul(screenSize).div(512.0);
-
-      // Large-scale paper variation (fibers, aging) - 4 octaves
-      const coarseGrain = mx_fractal_noise_float(
-        noiseCoord.mul(8.0),     // position
-        4,                        // octaves
-        2.0,                      // lacunarity
-        0.5,                      // diminish
-        0.5,                      // amplitude
-      );
-
-      // Fine-scale grain (paper texture surface) - 4 octaves, offset
-      const fineGrain = mx_fractal_noise_float(
-        noiseCoord.mul(24.0).add(vec2(7.31, 7.31)),
-        4,
+      const grain = mx_fractal_noise_float(
+        noiseCoord.mul(8.0),
+        1,      // 1 octave only (spec: ~0.2ms budget)
         2.0,
         0.5,
         0.5,
       );
-
-      // Combine: mostly coarse structure with fine detail
-      const grain = mix(coarseGrain, fineGrain, 0.35);
 
       // Warm parchment base tone
       const darkTone = vec3(0.78, 0.72, 0.62);
@@ -444,26 +431,33 @@ export class PostProcessingPipeline {
   // --- Parchment Overlay ---
 
   /**
-   * Update the camera height for the parchment overlay effect.
-   * Also drives zoom-dependent tilt-shift and saturation.
+   * Update the camera height for zoom-dependent effects.
    *
-   * - height <= 2000: no parchment effect (opacity 0)
-   * - height >= 5000: full parchment effect (opacity 0.25)
-   * - smooth interpolation between these thresholds
+   * Spec §21:
+   * - Tilt-shift: bokeh 2.0 at detail (<80), 0.5 at tactical (300-500), 0 at regional+
+   * - Bloom: disabled at strategic zoom (>3000)
+   * - Saturation: fixed 0.85 (spec §21)
+   * - Parchment: 0.0 at h≤2000, 0.15 at h≥5000
    */
   updateCameraHeight(height: number): void {
     this._cameraHeight.value = height;
 
-    // Zoom-dependent tilt-shift: strong at close zoom, off at strategic
-    // smoothstep(500, 300, h) -> 1.0 at h<=300, 0.0 at h>=500
-    const tiltFactor = Math.max(0, Math.min(1, (500 - height) / 200));
-    this._blurAmount.value = 2.0 * tiltFactor;
+    // Tilt-shift: 2.0 at detail (<80), ramps down to 0.5 at tactical (500), 0 at regional (>500)
+    if (height >= 500) {
+      this._blurAmount.value = 0;
+    } else if (height >= 80) {
+      // Linear interpolation: 0.5 at 500 → 2.0 at 80
+      const t = (500 - height) / (500 - 80);
+      this._blurAmount.value = 0.5 + 1.5 * t;
+    } else {
+      this._blurAmount.value = 2.0;
+    }
 
-    // Zoom-dependent saturation: more vivid at close zoom, slightly desaturated at strategic
-    // Close (<300): 1.0, Mid (500-2000): 0.85, Far (>3000): 0.75
-    const satClose = Math.max(0, Math.min(1, (500 - height) / 200));
-    const satFar = Math.max(0, Math.min(1, (height - 2000) / 1000));
-    this._saturation.value = 0.85 + 0.15 * satClose - 0.10 * satFar;
+    // Bloom: disabled at strategic zoom (spec §21)
+    this._bloomStrength.value = height > 3000 ? 0 : 0.15;
+
+    // Saturation: fixed 0.85 per spec (no dynamic variation)
+    this._saturation.value = 0.85;
   }
 
   /** Current camera height value driving the parchment overlay */
