@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import { MAP_SIZE, WATER_LEVEL } from '../config';
 import { CITY_DATABASE } from './cityDatabase';
+import { sampleHeight, hasHeightmap } from './heightmapLoader';
 import {
   getTradeShipGeometry,
   getFishingBoatGeometry,
@@ -108,6 +109,7 @@ function generateMockAgents(): MockAgent[] {
   }
 
   // Citizens: around tier 1-2 cities
+  const useHm = hasHeightmap();
   const majorCities = allCities.filter((c) => c.tier <= 2);
   for (let i = 0; i < majorCities.length; i++) {
     const city = majorCities[i];
@@ -116,10 +118,12 @@ function generateMockAgents(): MockAgent[] {
     for (let j = 0; j < citizenCount; j++) {
       const angle = deterministicHash(i * 10 + j + 200, 100) * Math.PI * 2;
       const dist = 2 + deterministicHash(i * 10 + j + 200, 200) * 8;
+      const tx = city.tileX + Math.cos(angle) * dist;
+      const tz = city.tileY + Math.sin(angle) * dist;
       agents.push({
-        x: city.tileX - HALF_MAP + Math.cos(angle) * dist,
-        z: city.tileY - HALF_MAP + Math.sin(angle) * dist,
-        y: 0, // Will be set to terrain height
+        x: tx - HALF_MAP,
+        z: tz - HALF_MAP,
+        y: useHm ? (sampleHeight(tx, tz) ?? 0) + 1 : 0,
         angle: deterministicHash(i * 10 + j + 200, 300) * Math.PI * 2,
         speed: 0.1 + deterministicHash(i * 10 + j + 200, 400) * 0.3,
         type: AgentModelType.CITIZEN,
@@ -135,10 +139,12 @@ function generateMockAgents(): MockAgent[] {
     for (let j = 0; j < 2; j++) {
       const angle = deterministicHash(i * 5 + j + 500, 100) * Math.PI * 2;
       const dist = 5 + deterministicHash(i * 5 + j + 500, 200) * 15;
+      const tx = city.tileX + Math.cos(angle) * dist;
+      const tz = city.tileY + Math.sin(angle) * dist;
       agents.push({
-        x: city.tileX - HALF_MAP + Math.cos(angle) * dist,
-        z: city.tileY - HALF_MAP + Math.sin(angle) * dist,
-        y: 0,
+        x: tx - HALF_MAP,
+        z: tz - HALF_MAP,
+        y: useHm ? (sampleHeight(tx, tz) ?? 0) + 1 : 0,
         angle: deterministicHash(i * 5 + j + 500, 300) * Math.PI * 2,
         speed: 0.2 + deterministicHash(i * 5 + j + 500, 400) * 0.4,
         type: AgentModelType.LEGION,
@@ -153,10 +159,12 @@ function generateMockAgents(): MockAgent[] {
     if (!city) continue;
     const angle = deterministicHash(i + 800, 100) * Math.PI * 2;
     const dist = 10 + deterministicHash(i + 800, 200) * 20;
+    const tx = city.tileX + Math.cos(angle) * dist;
+    const tz = city.tileY + Math.sin(angle) * dist;
     agents.push({
-      x: city.tileX - HALF_MAP + Math.cos(angle) * dist,
-      z: city.tileY - HALF_MAP + Math.sin(angle) * dist,
-      y: 0,
+      x: tx - HALF_MAP,
+      z: tz - HALF_MAP,
+      y: useHm ? (sampleHeight(tx, tz) ?? 0) + 1 : 0,
       angle: deterministicHash(i + 800, 300) * Math.PI * 2,
       speed: 0.15 + deterministicHash(i + 800, 400) * 0.2,
       type: AgentModelType.CARAVAN,
