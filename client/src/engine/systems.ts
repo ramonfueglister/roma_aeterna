@@ -27,6 +27,7 @@ import { TreeRenderer } from '../world/treeRenderer';
 import { PostProcessingPipeline } from '../rendering/postProcessing';
 import { TextLabelRenderer } from '../world/textLabels';
 import { CITY_DATABASE } from '../world/cityDatabase';
+import { PROVINCE_DATABASE } from '../world/provinceDatabase';
 import { AgentRenderer } from '../world/agentRenderer';
 import { ParticleSystem } from '../world/particleSystem';
 import { RoadRenderer } from '../world/roadRenderer';
@@ -216,6 +217,7 @@ export class TextLabelSystem extends BaseSystem {
   protected onInit(engine: Engine): void {
     this.renderer = new TextLabelRenderer(engine.scene);
     this.renderer.setCities([...CITY_DATABASE]);
+    this.renderer.setProvinces([...PROVINCE_DATABASE]);
   }
 
   // Driven by ECS labelSystem
