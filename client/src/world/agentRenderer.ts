@@ -282,6 +282,7 @@ export class AgentRenderer {
       const geo = geoGetters[t]!();
       const mesh = new THREE.InstancedMesh(geo, AGENT_MATERIAL, agents.length);
       mesh.frustumCulled = false;
+      mesh.castShadow = true;
 
       for (let i = 0; i < agents.length; i++) {
         const a = agents[i]!;

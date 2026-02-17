@@ -59,6 +59,9 @@ export class Engine {
   /** DOM element the renderer canvas lives in. */
   readonly container: HTMLDivElement;
 
+  /** Directional sun light (public for shadow target updates). */
+  private sun!: THREE.DirectionalLight;
+
   private systems: GameSystem[] = [];
   private running = false;
   private animationFrameId = 0;
@@ -72,8 +75,8 @@ export class Engine {
 
     // Scene
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x0a1120, 800, 2000);
-    this.scene.background = new THREE.Color(0x07111b);
+    this.scene.fog = new THREE.Fog(0x1a2a3d, 800, 2200);
+    this.scene.background = new THREE.Color(0x0e1a2a);
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(
@@ -91,15 +94,34 @@ export class Engine {
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.container.appendChild(this.renderer.domElement);
 
     // Lighting (spec section 22)
-    const ambientLight = new THREE.AmbientLight(0x8c9bb4, 0.4);
-    this.scene.add(ambientLight);
+    // Hemisphere light: warm sky (sun-lit) + cool ground (shadow fill)
+    const hemiLight = new THREE.HemisphereLight(0xd4c5a0, 0x3a4a5e, 0.35);
+    this.scene.add(hemiLight);
 
-    const sun = new THREE.DirectionalLight(0xfff8eb, 1.0);
+    // Warm golden-hour directional sun from southwest
+    const sun = new THREE.DirectionalLight(0xfff8eb, 1.2);
     sun.position.set(-1500, 3000, -1200);
+
+    // Shadow map: covers a 600x600 area around the camera target
+    sun.castShadow = true;
+    sun.shadow.mapSize.width = 2048;
+    sun.shadow.mapSize.height = 2048;
+    sun.shadow.camera.near = 100;
+    sun.shadow.camera.far = 6000;
+    sun.shadow.camera.left = -300;
+    sun.shadow.camera.right = 300;
+    sun.shadow.camera.top = 300;
+    sun.shadow.camera.bottom = -300;
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.5;
+    this.sun = sun;
     this.scene.add(sun);
+    this.scene.add(sun.target);
 
     // Resize
     window.addEventListener('resize', this.onResize);
@@ -167,6 +189,18 @@ export class Engine {
 
     const deltaTime = this.clock.getDelta();
     const elapsed = this.clock.getElapsedTime();
+
+    // Shadow map: follow camera XZ, disable at high altitude for perf
+    const camPos = this.camera.position;
+    const shadowsNeeded = camPos.y < 1500;
+    if (this.sun.castShadow !== shadowsNeeded) {
+      this.sun.castShadow = shadowsNeeded;
+    }
+    if (shadowsNeeded) {
+      this.sun.position.set(camPos.x - 300, 600, camPos.z - 240);
+      this.sun.target.position.set(camPos.x, 0, camPos.z);
+      this.sun.target.updateMatrixWorld();
+    }
 
     // Run ECS pipeline first (camera sync, viewport, visibility, etc.)
     runPipeline(world, deltaTime);

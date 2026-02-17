@@ -543,6 +543,8 @@ export class TreeRenderer {
           count,
         );
         mesh.frustumCulled = false;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         this.scene.add(mesh);
         this.variantMeshes[v] = mesh;
       }

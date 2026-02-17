@@ -841,6 +841,8 @@ export class BuildingRenderer {
       const geo = getTemplateGeometry(template);
       const mesh = new THREE.InstancedMesh(geo, BUILDING_MATERIAL, instances.length);
       mesh.frustumCulled = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
 
       for (let i = 0; i < instances.length; i++) {
         const b = instances[i]!;

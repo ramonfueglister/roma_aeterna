@@ -180,6 +180,8 @@ export class ChunkLoader {
     );
     bm.name = `terrain_lod${lod}`;
     bm.frustumCulled = false; // We manage visibility per-instance
+    bm.receiveShadow = true;
+    bm.castShadow = true;
     // Higher LODs render behind lower LODs for proper alpha layering
     bm.renderOrder = lod;
     this.batchedMeshes.set(lod, bm);
