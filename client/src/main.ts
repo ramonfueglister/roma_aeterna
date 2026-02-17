@@ -50,6 +50,9 @@ async function init(): Promise<void> {
 
   const engine = new Engine(app);
 
+  // Initialize renderer backend (WebGPU or WebGL2 fallback)
+  await engine.init();
+
   // Register systems in update order:
   // 1. Camera first (other systems read camera position)
   // 2. Terrain (loads chunks based on camera)

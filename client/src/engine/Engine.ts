@@ -6,12 +6,17 @@
  * camera, and the render loop. Subsystems receive init/update/dispose
  * calls in registration order.
  *
+ * Uses WebGPURenderer which supports both native WebGPU and WebGL2
+ * (via forceWebGL fallback). TSL node materials compile to GLSL or WGSL
+ * automatically depending on the active backend.
+ *
  * The ECS pipeline runs first each frame (via runPipeline), then
  * GameSystems update. During migration, both coexist. Once all
  * GameSystems are migrated, only the ECS pipeline will remain.
  */
 
 import * as THREE from 'three';
+import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
 import { APP_NAME, CAMERA_FOV, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAX_PIXEL_RATIO, NEAR_CLIP } from '../config';
 import { perfMonitor } from '../core/perfMonitor';
 import { createLogger } from '../core/logger';
@@ -48,7 +53,7 @@ export interface GameSystem {
 export class Engine {
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
-  readonly renderer: THREE.WebGLRenderer;
+  readonly renderer: InstanceType<typeof WebGPURenderer>;
   readonly clock = new THREE.Clock();
 
   /** DOM element the renderer canvas lives in. */
@@ -79,8 +84,11 @@ export class Engine {
     );
     this.camera.position.set(0, DEFAULT_CAMERA_HEIGHT, -24);
 
-    // Renderer
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Renderer: WebGPURenderer with WebGL2 fallback
+    this.renderer = new WebGPURenderer({
+      antialias: true,
+      forceWebGL: !navigator.gpu,
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.container.appendChild(this.renderer.domElement);
@@ -96,7 +104,17 @@ export class Engine {
     // Resize
     window.addEventListener('resize', this.onResize);
 
-    log.info(`${APP_NAME} engine created`);
+    const backend = navigator.gpu ? 'WebGPU' : 'WebGL2';
+    log.info(`${APP_NAME} engine created (${backend} backend)`);
+  }
+
+  /**
+   * Initialize the renderer backend. Must be called before start().
+   * WebGPURenderer requires async initialization for both backends.
+   */
+  async init(): Promise<void> {
+    await this.renderer.init();
+    log.info('Renderer initialized');
   }
 
   // ── Subsystem Management ──────────────────────────────────────
