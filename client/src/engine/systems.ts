@@ -3,6 +3,11 @@
  *
  * Each system adapts an existing class (ChunkLoader, WaterRenderer, etc.)
  * to the GameSystem interface so the Engine can manage them uniformly.
+ *
+ * Systems with ECS delegators (terrain, cities, trees, agents, labels,
+ * provinces) have their update() driven by the ECS pipeline instead.
+ * Their GameSystem.update() is a no-op to prevent double-updates.
+ * They still handle init() (event listeners, resource setup) and dispose().
  */
 
 import * as THREE from 'three';
@@ -86,10 +91,8 @@ export class TerrainSystem extends BaseSystem {
     });
   }
 
-  update(): void {
-    const cam = this.engine.camera.position;
-    this.loader.update(cam.x, cam.z);
-  }
+  // Driven by ECS chunkLoadSystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.loader.dispose();
@@ -155,9 +158,8 @@ export class ProvinceSystem extends BaseSystem {
     });
   }
 
-  update(_dt: number, elapsed: number): void {
-    this.renderer.update(this.engine.camera.position.y, elapsed);
-  }
+  // Driven by ECS provinceOverlaySystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.renderer.dispose();
@@ -174,10 +176,8 @@ export class CitySystem extends BaseSystem {
     this.renderer = new CityRenderer(engine.scene);
   }
 
-  update(): void {
-    const cam = this.engine.camera.position;
-    this.renderer.update(cam.y, cam.x, cam.z);
-  }
+  // Driven by ECS cityLODSystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.renderer.dispose();
@@ -199,10 +199,8 @@ export class TreeSystem extends BaseSystem {
     });
   }
 
-  update(): void {
-    const cam = this.engine.camera.position;
-    this.renderer.update(cam.x, cam.y, cam.z);
-  }
+  // Driven by ECS treeRenderSystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.renderer.dispose();
@@ -220,10 +218,8 @@ export class TextLabelSystem extends BaseSystem {
     this.renderer.setCities([...CITY_DATABASE]);
   }
 
-  update(): void {
-    const cam = this.engine.camera.position;
-    this.renderer.update(cam.y, cam.x, cam.z);
-  }
+  // Driven by ECS labelSystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.renderer.dispose();
@@ -260,10 +256,8 @@ export class AgentSystem extends BaseSystem {
     this.renderer = new AgentRenderer(engine.scene);
   }
 
-  update(_dt: number, elapsed: number): void {
-    const cam = this.engine.camera.position;
-    this.renderer.update(cam.x, cam.y, cam.z, elapsed);
-  }
+  // Driven by ECS agentRenderSystem
+  update(): void { /* no-op */ }
 
   dispose(): void {
     this.renderer.dispose();

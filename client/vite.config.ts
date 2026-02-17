@@ -8,4 +8,19 @@ export default defineConfig({
   preview: {
     port: 4173,
   },
+  build: {
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/three/')) {
+            return 'three';
+          }
+          if (id.includes('node_modules/troika-')) {
+            return 'troika';
+          }
+        },
+      },
+    },
+  },
 });
