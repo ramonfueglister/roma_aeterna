@@ -75,8 +75,8 @@ export class Engine {
 
     // Scene
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x1a2a3d, 800, 2200);
-    this.scene.background = new THREE.Color(0x0e1a2a);
+    this.scene.fog = new THREE.Fog(0x0a1120, 800, 2000);
+    this.scene.background = new THREE.Color(0x07111b);
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(
@@ -99,12 +99,12 @@ export class Engine {
     this.container.appendChild(this.renderer.domElement);
 
     // Lighting (spec section 22)
-    // Hemisphere light: warm sky (sun-lit) + cool ground (shadow fill)
-    const hemiLight = new THREE.HemisphereLight(0xd4c5a0, 0x3a4a5e, 0.35);
-    this.scene.add(hemiLight);
+    // Ambient: cool sky blue (RGB 140, 155, 180), intensity 0.4
+    const ambientLight = new THREE.AmbientLight(0x8c9bb4, 0.4);
+    this.scene.add(ambientLight);
 
-    // Warm golden-hour directional sun from southwest
-    const sun = new THREE.DirectionalLight(0xfff8eb, 1.2);
+    // Warm golden-hour directional sun from southwest (spec: RGB 255,248,235, intensity 1.0)
+    const sun = new THREE.DirectionalLight(0xfff8eb, 1.0);
     sun.position.set(-1500, 3000, -1200);
 
     // Shadow map: covers a 600x600 area around the camera target
@@ -190,9 +190,10 @@ export class Engine {
     const deltaTime = this.clock.getDelta();
     const elapsed = this.clock.getElapsedTime();
 
-    // Shadow map: follow camera XZ, disable at high altitude for perf
+    // Contact shadows: only at close zoom (< 500) per spec section 22
+    // Provides grounding shadows for entities, fades out by height 500
     const camPos = this.camera.position;
-    const shadowsNeeded = camPos.y < 1500;
+    const shadowsNeeded = camPos.y < 500;
     if (this.sun.castShadow !== shadowsNeeded) {
       this.sun.castShadow = shadowsNeeded;
     }
