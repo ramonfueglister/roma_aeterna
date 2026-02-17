@@ -388,7 +388,7 @@ export class PostProcessingPipeline {
       renderSize,   // resolution
       0.3,          // strength - subtle warm glow
       0.5,          // radius - soft spread
-      0.85,         // threshold - only bright highlights
+      0.75,         // threshold - lowered for province border glow
     );
     this.composer.addPass(this.bloomPass);
 
@@ -585,6 +585,17 @@ export class PostProcessingPipeline {
    */
   updateCameraHeight(height: number): void {
     this.parchmentOverlayUniforms.uCameraHeight.value = height;
+
+    // Zoom-dependent tilt-shift: strong at close zoom, off at strategic
+    // smoothstep(500, 300, h) → 1.0 at h<=300, 0.0 at h>=500
+    const tiltFactor = Math.max(0, Math.min(1, (500 - height) / 200));
+    this.tiltShiftUniforms.blurAmount.value = 2.0 * tiltFactor;
+
+    // Zoom-dependent saturation: more vivid at close zoom, slightly desaturated at strategic
+    // Close (<300): 1.0, Mid (500-2000): 0.85, Far (>3000): 0.75
+    const satClose = Math.max(0, Math.min(1, (500 - height) / 200));
+    const satFar = Math.max(0, Math.min(1, (height - 2000) / 1000));
+    this.colorGradingUniforms.saturation.value = 0.85 + 0.15 * satClose - 0.10 * satFar;
   }
 
   /** Current camera height value driving the parchment overlay */

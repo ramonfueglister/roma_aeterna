@@ -197,7 +197,7 @@ export class AgentRenderer {
    * Per-frame update. Animates agent positions and rebuilds instances
    * when camera moves significantly.
    */
-  update(cameraX: number, cameraY: number, cameraZ: number, elapsed: number): void {
+  update(cameraX: number, cameraY: number, cameraZ: number, _elapsed: number): void {
     // Hide at high altitude
     if (cameraY > MAX_VISIBLE_HEIGHT) {
       this.hideAll();
@@ -289,11 +289,11 @@ export class AgentRenderer {
       meshRefs[t] = mesh;
     }
 
-    this.tradeShipMesh = meshRefs[0];
-    this.fishingBoatMesh = meshRefs[1];
-    this.citizenMesh = meshRefs[2];
-    this.legionMesh = meshRefs[3];
-    this.caravanMesh = meshRefs[4];
+    this.tradeShipMesh = meshRefs[0] ?? null;
+    this.fishingBoatMesh = meshRefs[1] ?? null;
+    this.citizenMesh = meshRefs[2] ?? null;
+    this.legionMesh = meshRefs[3] ?? null;
+    this.caravanMesh = meshRefs[4] ?? null;
   }
 
   private updateInstanceMatrices(): void {
