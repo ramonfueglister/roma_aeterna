@@ -823,30 +823,4 @@ export class CityRenderer {
     }
     return map;
   }
-
-  private filterCitiesByZone(
-    cities: readonly CityData[],
-    zone: ViewZone,
-    cameraX: number,
-    cameraZ: number,
-  ): CityData[] {
-    if (zone === ViewZone.Strategic) {
-      return [...cities];
-    }
-
-    const range = zone === ViewZone.Tactical ? TACTICAL_RANGE : DETAIL_RANGE;
-    const rangeSq = range * range;
-
-    const result: CityData[] = [];
-    for (const c of cities) {
-      const pos = this.cityWorldPositions.get(c.id);
-      if (!pos) continue;
-      const dx = pos.x - cameraX;
-      const dz = pos.z - cameraZ;
-      if (dx * dx + dz * dz <= rangeSq) {
-        result.push(c);
-      }
-    }
-    return result;
-  }
 }
