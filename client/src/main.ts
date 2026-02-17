@@ -45,6 +45,7 @@ import {
   Culture,
 } from './ecs';
 import { CITY_DATABASE } from './world/cityDatabase';
+import { sampleHeight, hasHeightmap } from './world/heightmapLoader';
 import { MAP_SIZE, PROVINCE_COUNT } from './config';
 import type { CultureType } from './types';
 
@@ -73,12 +74,13 @@ function hydrateProvinceEntities(): void {
 /** Hydrate ECS city entities from the static city database. */
 function hydrateCityEntities(): void {
   const halfMap = MAP_SIZE / 2;
+  const useHm = hasHeightmap();
   for (const city of CITY_DATABASE) {
     const eid = createCityEntity(world);
 
-    // World position (centered on map origin)
+    // World position (centered on map origin, terrain-aware Y)
     Position.x[eid] = city.tileX - halfMap;
-    Position.y[eid] = 0; // ground level, set by terrain later
+    Position.y[eid] = useHm ? (sampleHeight(city.tileX, city.tileY) ?? 0) : 0;
     Position.z[eid] = city.tileY - halfMap;
 
     // City info
