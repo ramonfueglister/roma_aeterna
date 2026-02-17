@@ -1,0 +1,170 @@
+/**
+ * Engine: Central game loop and subsystem manager.
+ *
+ * Each subsystem implements the GameSystem interface and is registered
+ * via engine.register(). The engine owns the Three.js renderer, scene,
+ * camera, and the render loop. Subsystems receive init/update/dispose
+ * calls in registration order.
+ */
+
+import * as THREE from 'three';
+import { APP_NAME, CAMERA_FOV, DEFAULT_CAMERA_HEIGHT, FAR_CLIP, MAX_PIXEL_RATIO, NEAR_CLIP } from '../config';
+import { perfMonitor } from '../core/perfMonitor';
+import { createLogger } from '../core/logger';
+
+const log = createLogger('Engine');
+
+// ── Subsystem Interface ───────────────────────────────────────────
+
+export interface GameSystem {
+  /** Unique name for logging and lookup. */
+  readonly name: string;
+
+  /**
+   * Called once after the engine is fully constructed.
+   * Receives the engine so subsystems can access scene, camera, renderer.
+   */
+  init(engine: Engine): void;
+
+  /**
+   * Called every frame. deltaTime is in seconds, elapsed is total seconds.
+   */
+  update(deltaTime: number, elapsed: number): void;
+
+  /** Called on window resize. */
+  resize?(width: number, height: number): void;
+
+  /** Clean up GPU resources, event listeners, etc. */
+  dispose(): void;
+}
+
+// ── Engine ────────────────────────────────────────────────────────
+
+export class Engine {
+  readonly scene: THREE.Scene;
+  readonly camera: THREE.PerspectiveCamera;
+  readonly renderer: THREE.WebGLRenderer;
+  readonly clock = new THREE.Clock();
+
+  /** DOM element the renderer canvas lives in. */
+  readonly container: HTMLDivElement;
+
+  private systems: GameSystem[] = [];
+  private running = false;
+  private animationFrameId = 0;
+
+  constructor(mountPoint: HTMLElement) {
+    // Canvas container
+    this.container = document.createElement('div');
+    this.container.style.width = '100%';
+    this.container.style.height = '100%';
+    mountPoint.appendChild(this.container);
+
+    // Scene
+    this.scene = new THREE.Scene();
+    this.scene.fog = new THREE.Fog(0x0a1120, 800, 2000);
+    this.scene.background = new THREE.Color(0x07111b);
+
+    // Camera
+    this.camera = new THREE.PerspectiveCamera(
+      CAMERA_FOV,
+      window.innerWidth / window.innerHeight,
+      NEAR_CLIP,
+      FAR_CLIP,
+    );
+    this.camera.position.set(0, DEFAULT_CAMERA_HEIGHT, -24);
+
+    // Renderer
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.container.appendChild(this.renderer.domElement);
+
+    // Lighting (spec section 22)
+    const ambientLight = new THREE.AmbientLight(0x8c9bb4, 0.4);
+    this.scene.add(ambientLight);
+
+    const sun = new THREE.DirectionalLight(0xfff8eb, 1.0);
+    sun.position.set(-1500, 3000, -1200);
+    this.scene.add(sun);
+
+    // Resize
+    window.addEventListener('resize', this.onResize);
+
+    log.info(`${APP_NAME} engine created`);
+  }
+
+  // ── Subsystem Management ──────────────────────────────────────
+
+  /** Register a subsystem. Call before start(). */
+  register(system: GameSystem): void {
+    this.systems.push(system);
+    system.init(this);
+    log.info(`System registered: ${system.name}`);
+  }
+
+  /** Get a registered system by name. */
+  getSystem<T extends GameSystem>(name: string): T | undefined {
+    return this.systems.find((s) => s.name === name) as T | undefined;
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────
+
+  /** Start the render loop. */
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.clock.start();
+    this.animate();
+    log.info('Render loop started');
+  }
+
+  /** Stop the render loop and dispose everything. */
+  stop(): void {
+    this.running = false;
+    cancelAnimationFrame(this.animationFrameId);
+
+    for (const system of this.systems) {
+      system.dispose();
+    }
+    this.systems = [];
+
+    window.removeEventListener('resize', this.onResize);
+    this.renderer.dispose();
+    log.info('Engine stopped');
+  }
+
+  // ── Render Loop ───────────────────────────────────────────────
+
+  private animate = (): void => {
+    if (!this.running) return;
+    this.animationFrameId = requestAnimationFrame(this.animate);
+
+    perfMonitor.beginFrame();
+
+    const deltaTime = this.clock.getDelta();
+    const elapsed = this.clock.getElapsedTime();
+
+    for (const system of this.systems) {
+      system.update(deltaTime, elapsed);
+    }
+
+    perfMonitor.drawCalls = this.renderer.info.render.calls;
+    perfMonitor.triangles = this.renderer.info.render.triangles;
+    perfMonitor.endFrame();
+  };
+
+  // ── Resize ────────────────────────────────────────────────────
+
+  private onResize = (): void => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+
+    for (const system of this.systems) {
+      system.resize?.(w, h);
+    }
+  };
+}

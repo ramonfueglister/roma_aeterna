@@ -194,24 +194,6 @@ export interface ProvinceData {
 
 export type QualityPreset = 'high' | 'medium' | 'low' | 'toaster';
 
-export interface QualityPresetConfig {
-  preset: QualityPreset;
-  label: string;
-  targetFps: number;
-  workers: number;
-  treeInstances: number;
-  cityCache: number;
-  lodDistanceScale: number;
-  waterShader: 'full' | 'normal' | 'flat';
-  ambientEffects: 'full' | 'reduced' | 'core';
-  ambientFxEmitters: number;
-  cloudLayers: number;
-  streetLifeCap: number;
-  harvestLoopCap: number;
-  labelCap: number;
-  contactShadows: 'screen-space' | 'blob';
-}
-
 // ── Events ──────────────────────────────────────────────────────
 
 export type GameEventType =
@@ -221,7 +203,6 @@ export type GameEventType =
   | 'agent_selected'
   | 'province_selected'
   | 'camera_moved'
-  | 'quality_changed'
   | 'viewport_changed';
 
 export interface GameEvent<T = unknown> {

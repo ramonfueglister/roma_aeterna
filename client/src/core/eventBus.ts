@@ -50,7 +50,7 @@ export class EventBus<EventMap extends { [K in keyof EventMap]: unknown }> {
 
 // ── Game Event Map ──────────────────────────────────────────────
 
-import type { ChunkCoord, CityData, AgentData, LODLevel, ViewportRect, QualityPreset } from '../types';
+import type { ChunkCoord, CityData, AgentData, LODLevel, ViewportRect } from '../types';
 
 export interface GameEventMap {
   chunk_loaded: ChunkCoord;
@@ -59,7 +59,6 @@ export interface GameEventMap {
   agent_selected: AgentData | null;
   province_selected: { id: number; name: string } | null;
   camera_moved: { x: number; y: number; z: number };
-  quality_changed: QualityPreset;
   viewport_changed: ViewportRect;
   lod_changed: { cx: number; cy: number; lod: LODLevel };
   toggle_overlay: void;

@@ -1,10 +1,10 @@
 /**
  * ChunkLoader: manages loading, caching, and lifecycle of terrain chunks.
  *
- * Decides which chunks to load/unload based on camera position using
- * spiral outward ordering. Mesh generation is offloaded to a WorkerPool
- * (Web Workers) for non-blocking operation. A synchronous fallback via
- * buildChunkMesh is used only when the WorkerPool is unavailable.
+ * Uses THREE.BatchedMesh to render all chunks of the same LOD level in a
+ * single draw call (4 draw calls total for terrain). Each chunk's geometry
+ * is added to the appropriate LOD BatchedMesh and positioned via its
+ * instance matrix.
  *
  * Chunk world-space positioning:
  *   Chunk (0,0) starts at world x = -MAP_SIZE/2, z = -MAP_SIZE/2.
@@ -20,6 +20,7 @@ import { gameEvents } from '../core/eventBus';
 import { createLogger } from '../core/logger';
 import { generateProceduralChunk } from './proceduralChunk';
 import { buildChunkMesh } from './chunkMeshBuilder';
+import { getCachedMesh, putCachedMesh, hashChunkData } from './meshCache';
 import { WorkerPool } from '../workers/workerPool';
 
 const log = createLogger('ChunkLoader');
@@ -27,13 +28,14 @@ const log = createLogger('ChunkLoader');
 // ── Types ──────────────────────────────────────────────────────────
 
 interface LoadedChunkEntry {
-  mesh: THREE.Mesh;
   lod: LODLevel;
+  geometryId: number;
+  instanceId: number;
 }
 
 /**
  * Provider function that returns ChunkData for a given chunk coordinate.
- * Returns null if the chunk is unavailable (e.g. out of bounds or not yet fetched).
+ * Returns null if the chunk is unavailable.
  */
 export type ChunkDataProvider = (cx: number, cy: number) => ChunkData | null;
 
@@ -42,7 +44,7 @@ export type ChunkDataProvider = (cx: number, cy: number) => ChunkData | null;
 /** Maximum chunks to initiate loading per update frame. */
 const LOAD_BUDGET_PER_FRAME = 2;
 
-/** Shared material for all chunk meshes (vertex-colored, flat-shaded). */
+/** Shared material for all terrain BatchedMeshes (vertex-colored, flat-shaded). */
 const CHUNK_MATERIAL = new THREE.MeshStandardMaterial({
   vertexColors: true,
   flatShading: true,
@@ -51,9 +53,24 @@ const CHUNK_MATERIAL = new THREE.MeshStandardMaterial({
   side: THREE.FrontSide,
 });
 
-// ── Pre-computed spiral offsets (computed once, reused every frame) ─
+/**
+ * Per-LOD buffer budgets. Each LOD level pre-allocates space in its
+ * BatchedMesh for this many chunks, with reserved vertex/index counts
+ * sized for the worst-case greedy meshing output at that LOD.
+ */
+const LOD_BUDGETS: Record<LODLevel, {
+  maxChunks: number;
+  vertsPerChunk: number;
+  indicesPerChunk: number;
+}> = {
+  0: { maxChunks: 80,  vertsPerChunk: 5000,  indicesPerChunk: 8000 },
+  1: { maxChunks: 120, vertsPerChunk: 1500,  indicesPerChunk: 2500 },
+  2: { maxChunks: 200, vertsPerChunk: 500,   indicesPerChunk: 800 },
+  3: { maxChunks: 200, vertsPerChunk: 12,    indicesPerChunk: 12 },
+};
 
-/** Spiral offsets covering the maximum unload radius. */
+// ── Pre-computed spiral offsets ────────────────────────────────────
+
 let cachedSpiralRadius = 0;
 let cachedSpiral: Array<[number, number]> = [];
 
@@ -68,8 +85,11 @@ function getSpiralOffsets(radius: number): Array<[number, number]> {
 // ── ChunkLoader ────────────────────────────────────────────────────
 
 export class ChunkLoader {
-  /** THREE.Group added to the scene; all chunk meshes are children. */
+  /** THREE.Group added to the scene; all BatchedMeshes are children. */
   readonly terrainGroup: THREE.Group;
+
+  /** One BatchedMesh per LOD level. */
+  private readonly batchedMeshes: Map<LODLevel, THREE.BatchedMesh> = new Map();
 
   /** Currently loaded and visible chunks. */
   private loadedChunks: Map<ChunkKey, LoadedChunkEntry> = new Map();
@@ -83,19 +103,18 @@ export class ChunkLoader {
   /** Radius in chunks beyond which chunks are unloaded. */
   unloadRadius: number;
 
-  /**
-   * Function that provides ChunkData for a coordinate pair.
-   * Defaults to the procedural generator.
-   * Replace this with a Supabase-backed provider when the backend is ready.
-   */
+  /** Chunk data provider. Defaults to procedural generator. */
   chunkDataProvider: ChunkDataProvider;
 
   /** Worker pool for off-thread mesh generation. */
   private workerPool: WorkerPool | null;
 
-  /** Last camera chunk position; skip work when the camera hasn't moved to a new chunk. */
+  /** Last camera chunk position. */
   private lastCameraCx = -9999;
   private lastCameraCy = -9999;
+
+  /** Reusable matrix for positioning instances. */
+  private readonly tmpMatrix = new THREE.Matrix4();
 
   constructor(
     scene: THREE.Scene,
@@ -111,42 +130,51 @@ export class ChunkLoader {
 
     this.loadRadius = options?.loadRadius ?? 8;
     this.unloadRadius = options?.unloadRadius ?? 12;
-
-    // Accept an external WorkerPool or create a default one.
-    // The pool can be shared across multiple subsystems if needed.
     this.workerPool = options?.workerPool ?? null;
-
-    // Default to procedural generation
     this.chunkDataProvider = generateProceduralChunk;
+
+    // Create one BatchedMesh per LOD level
+    for (const lod of [0, 1, 2, 3] as LODLevel[]) {
+      this.createBatchedMesh(lod);
+    }
 
     const workerInfo = this.workerPool
       ? `workerPool=${this.workerPool.workerCount} workers`
       : 'sync fallback (no WorkerPool)';
 
     log.info(
-      `Initialised: loadRadius=${this.loadRadius}, unloadRadius=${this.unloadRadius}, ` +
-        `gridSize=${GRID_SIZE}x${GRID_SIZE}, ${workerInfo}`,
+      `Initialised (BatchedMesh): loadRadius=${this.loadRadius}, ` +
+      `unloadRadius=${this.unloadRadius}, ` +
+      `gridSize=${GRID_SIZE}x${GRID_SIZE}, ${workerInfo}`,
     );
+  }
+
+  // ── BatchedMesh Setup ─────────────────────────────────────────
+
+  private createBatchedMesh(lod: LODLevel): void {
+    const budget = LOD_BUDGETS[lod];
+    const totalVerts = budget.maxChunks * budget.vertsPerChunk;
+    const totalIndices = budget.maxChunks * budget.indicesPerChunk;
+
+    const bm = new THREE.BatchedMesh(
+      budget.maxChunks,
+      totalVerts,
+      totalIndices,
+      CHUNK_MATERIAL,
+    );
+    bm.name = `terrain_lod${lod}`;
+    bm.frustumCulled = false; // We manage visibility per-instance
+    this.batchedMeshes.set(lod, bm);
+    this.terrainGroup.add(bm);
   }
 
   // ── Public API ─────────────────────────────────────────────────
 
-  /**
-   * Called every frame from the render loop.
-   * Converts camera world position to chunk coordinates, then loads
-   * nearby chunks and unloads distant ones within a per-frame budget.
-   *
-   * @param cameraWorldX - Camera X in world space (Three.js X axis).
-   * @param cameraWorldZ - Camera Z in world space (Three.js Z axis).
-   */
   update(cameraWorldX: number, cameraWorldZ: number): void {
-    // Convert world position to tile coordinate
-    // World origin (-MAP_SIZE/2, -MAP_SIZE/2) maps to tile (0, 0)
     const tileX = cameraWorldX + MAP_SIZE / 2;
     const tileZ = cameraWorldZ + MAP_SIZE / 2;
     const { cx: cameraCx, cy: cameraCy } = worldToChunk(tileX, tileZ);
 
-    // Early exit if camera chunk has not changed
     if (cameraCx === this.lastCameraCx && cameraCy === this.lastCameraCy) {
       return;
     }
@@ -158,17 +186,14 @@ export class ChunkLoader {
     this.updateLODs(cameraCx, cameraCy);
   }
 
-  /** Number of chunks currently loaded and visible. */
   get loadedCount(): number {
     return this.loadedChunks.size;
   }
 
-  /** Number of chunks currently being built. */
   get pendingCount(): number {
     return this.pendingLoads.size;
   }
 
-  /** Replace the worker pool (e.g. after quality preset change). */
   setWorkerPool(pool: WorkerPool | null): void {
     this.workerPool = pool;
     log.info(
@@ -178,22 +203,23 @@ export class ChunkLoader {
     );
   }
 
-  /** Clean up all resources. */
   dispose(): void {
     for (const [key, entry] of this.loadedChunks) {
-      this.disposeEntry(entry);
+      this.removeFromBatch(entry);
       this.loadedChunks.delete(key);
     }
     this.pendingLoads.clear();
+
+    for (const bm of this.batchedMeshes.values()) {
+      bm.dispose();
+    }
+    this.batchedMeshes.clear();
     this.terrainGroup.removeFromParent();
     log.info('Disposed');
   }
 
   // ── Loading ────────────────────────────────────────────────────
 
-  /**
-   * Load chunks near the camera in spiral order, respecting per-frame budget.
-   */
   private loadNearbyChunks(cameraCx: number, cameraCy: number): void {
     const spiral = getSpiralOffsets(this.loadRadius);
     let loaded = 0;
@@ -218,13 +244,6 @@ export class ChunkLoader {
     }
   }
 
-  /**
-   * Load a single chunk: get data, build mesh off-thread, add to scene.
-   *
-   * Uses the WorkerPool for async mesh generation when available.
-   * Falls back to synchronous buildChunkMesh on the main thread if
-   * no worker pool is set (e.g. during tests or if workers fail to load).
-   */
   private loadChunk(cx: number, cy: number, lod: LODLevel): void {
     const key = makeChunkKey(cx, cy);
     this.pendingLoads.add(key);
@@ -235,10 +254,34 @@ export class ChunkLoader {
       return;
     }
 
+    const dataHash = hashChunkData(chunkData);
+
+    // Try IndexedDB cache first (async, non-blocking)
+    getCachedMesh(cx, cy, lod, dataHash).then((cached) => {
+      if (!this.pendingLoads.has(key)) return;
+
+      if (cached) {
+        this.onMeshReady(key, cx, cy, lod, cached);
+        return;
+      }
+
+      // Cache miss — generate the mesh
+      this.generateMesh(key, cx, cy, lod, chunkData, dataHash);
+    });
+  }
+
+  private generateMesh(
+    key: ChunkKey,
+    cx: number,
+    cy: number,
+    lod: LODLevel,
+    chunkData: ChunkData,
+    dataHash: string,
+  ): void {
     if (this.workerPool) {
-      // Async path: offload mesh generation to a Web Worker
       this.workerPool.requestMesh(chunkData, lod).then(
         (meshData) => {
+          putCachedMesh(cx, cy, lod, dataHash, meshData);
           this.onMeshReady(key, cx, cy, lod, meshData);
         },
         (error) => {
@@ -247,37 +290,27 @@ export class ChunkLoader {
             `Worker mesh generation failed for (${cx},${cy}) LOD${lod}, ` +
             `falling back to sync: ${error instanceof Error ? error.message : String(error)}`,
           );
-          // Fallback: build synchronously on main thread
-          this.loadChunkSync(key, cx, cy, lod, chunkData);
+          this.loadChunkSync(key, cx, cy, lod, chunkData, dataHash);
         },
       );
     } else {
-      // Sync fallback: build on main thread
-      this.loadChunkSync(key, cx, cy, lod, chunkData);
+      this.loadChunkSync(key, cx, cy, lod, chunkData, dataHash);
     }
   }
 
-  /**
-   * Synchronous mesh build fallback. Used when WorkerPool is unavailable
-   * or when a worker request fails.
-   */
   private loadChunkSync(
     key: ChunkKey,
     cx: number,
     cy: number,
     lod: LODLevel,
     chunkData: ChunkData,
+    dataHash: string,
   ): void {
     const meshData = buildChunkMesh(chunkData, lod);
+    putCachedMesh(cx, cy, lod, dataHash, meshData);
     this.onMeshReady(key, cx, cy, lod, meshData);
   }
 
-  /**
-   * Handle completed mesh data (from either worker or sync fallback).
-   *
-   * Guards against stale results: if the chunk was unloaded while
-   * the worker was busy (camera moved away), the result is discarded.
-   */
   private onMeshReady(
     key: ChunkKey,
     cx: number,
@@ -285,30 +318,22 @@ export class ChunkLoader {
     lod: LODLevel,
     meshData: ChunkMeshData,
   ): void {
-    // Discard if no longer pending (chunk was unloaded while building)
-    if (!this.pendingLoads.has(key)) {
-      return;
-    }
-
+    if (!this.pendingLoads.has(key)) return;
     this.pendingLoads.delete(key);
+    if (this.loadedChunks.has(key)) return;
 
-    // Discard if chunk was already loaded by another path (race condition)
-    if (this.loadedChunks.has(key)) {
+    const entry = this.addToBatch(cx, cy, lod, meshData);
+    if (!entry) {
+      log.warn(`BatchedMesh full for LOD${lod}, cannot add chunk (${cx},${cy})`);
       return;
     }
 
-    const mesh = this.createMeshFromData(meshData, cx, cy);
-    this.loadedChunks.set(key, { mesh, lod });
-    this.terrainGroup.add(mesh);
-
+    this.loadedChunks.set(key, entry);
     gameEvents.emit('chunk_loaded', { cx, cy });
   }
 
   // ── Unloading ──────────────────────────────────────────────────
 
-  /**
-   * Unload chunks that are beyond unloadRadius from camera chunk.
-   */
   private unloadDistantChunks(cameraCx: number, cameraCy: number): void {
     const toRemove: ChunkKey[] = [];
 
@@ -328,21 +353,13 @@ export class ChunkLoader {
     }
   }
 
-  /**
-   * Remove a single chunk: dispose GPU resources, remove from scene and map.
-   * Also cancels any pending load for this chunk key so that in-flight
-   * worker results are discarded in onMeshReady.
-   */
   private unloadChunk(key: ChunkKey): void {
     const entry = this.loadedChunks.get(key);
     if (!entry) return;
 
     const coords = parseKeyFast(key);
-    this.disposeEntry(entry);
+    this.removeFromBatch(entry);
     this.loadedChunks.delete(key);
-
-    // If the chunk is still pending (async build in flight), mark it
-    // as no longer wanted so onMeshReady discards the result.
     this.pendingLoads.delete(key);
 
     gameEvents.emit('chunk_unloaded', { cx: coords.cx, cy: coords.cy });
@@ -350,9 +367,6 @@ export class ChunkLoader {
 
   // ── LOD Management ─────────────────────────────────────────────
 
-  /**
-   * Re-evaluate LOD for loaded chunks and rebuild any that need a different level.
-   */
   private updateLODs(cameraCx: number, cameraCy: number): void {
     for (const [key, entry] of this.loadedChunks) {
       const coords = parseKeyFast(key);
@@ -363,14 +377,12 @@ export class ChunkLoader {
       const desiredLod = this.getLOD(dist);
 
       if (desiredLod !== entry.lod) {
-        // Skip if already rebuilding this chunk
         if (this.pendingLoads.has(key)) continue;
 
         const chunkData = this.chunkDataProvider(coords.cx, coords.cy);
         if (!chunkData) continue;
 
         if (this.workerPool) {
-          // Async LOD rebuild via worker
           this.pendingLoads.add(key);
           this.workerPool.requestMesh(chunkData, desiredLod).then(
             (meshData) => {
@@ -382,33 +394,18 @@ export class ChunkLoader {
                 `Worker LOD rebuild failed for (${coords.cx},${coords.cy}), ` +
                 `falling back to sync: ${error instanceof Error ? error.message : String(error)}`,
               );
-              // Sync fallback for LOD rebuild
               const syncMeshData = buildChunkMesh(chunkData, desiredLod);
               this.onLodMeshReady(key, coords.cx, coords.cy, desiredLod, syncMeshData);
             },
           );
         } else {
-          // Sync LOD rebuild
           const meshData = buildChunkMesh(chunkData, desiredLod);
-          const newMesh = this.createMeshFromData(meshData, coords.cx, coords.cy);
-
-          this.disposeEntry(entry);
-          entry.mesh = newMesh;
-          entry.lod = desiredLod;
-          this.terrainGroup.add(newMesh);
-
-          gameEvents.emit('lod_changed', { cx: coords.cx, cy: coords.cy, lod: desiredLod });
+          this.swapChunkLod(key, entry, coords.cx, coords.cy, desiredLod, meshData);
         }
       }
     }
   }
 
-  /**
-   * Handle completed LOD rebuild mesh data from a worker.
-   *
-   * Guards against stale results: the chunk may have been unloaded
-   * or further LOD changes may have occurred while the worker was busy.
-   */
   private onLodMeshReady(
     key: ChunkKey,
     cx: number,
@@ -419,35 +416,40 @@ export class ChunkLoader {
     this.pendingLoads.delete(key);
 
     const entry = this.loadedChunks.get(key);
-    if (!entry) {
-      // Chunk was unloaded while we were rebuilding -- discard.
-      return;
-    }
+    if (!entry) return;
+    if (entry.lod === lod) return;
 
-    // Only apply if the LOD is still different (might have been
-    // rebuilt again by a subsequent sync path).
-    if (entry.lod === lod) {
-      return;
-    }
-
-    const newMesh = this.createMeshFromData(meshData, cx, cy);
-
-    this.disposeEntry(entry);
-    entry.mesh = newMesh;
-    entry.lod = lod;
-    this.terrainGroup.add(newMesh);
-
-    gameEvents.emit('lod_changed', { cx, cy, lod });
+    this.swapChunkLod(key, entry, cx, cy, lod, meshData);
   }
 
-  /**
-   * Determine LOD level from Chebyshev distance (in chunks) to the camera chunk.
-   *
-   * LOD0: 0-2 chunks (full detail voxels)
-   * LOD1: 3-5 chunks (reduced)
-   * LOD2: 6-9 chunks (low detail)
-   * LOD3: 10+ chunks  (single quad per chunk)
-   */
+  private swapChunkLod(
+    key: ChunkKey,
+    entry: LoadedChunkEntry,
+    cx: number,
+    cy: number,
+    newLod: LODLevel,
+    meshData: ChunkMeshData,
+  ): void {
+    // Remove from old LOD batch
+    this.removeFromBatch(entry);
+
+    // Add to new LOD batch
+    const newEntry = this.addToBatch(cx, cy, newLod, meshData);
+    if (!newEntry) {
+      // Could not fit in new batch -- keep chunk removed
+      this.loadedChunks.delete(key);
+      log.warn(`BatchedMesh full for LOD${newLod} during LOD swap (${cx},${cy})`);
+      return;
+    }
+
+    // Update entry in-place
+    entry.lod = newEntry.lod;
+    entry.geometryId = newEntry.geometryId;
+    entry.instanceId = newEntry.instanceId;
+
+    gameEvents.emit('lod_changed', { cx, cy, lod: newLod });
+  }
+
   private getLOD(chunkDistance: number): LODLevel {
     if (chunkDistance <= 2) return 0;
     if (chunkDistance <= 5) return 1;
@@ -455,56 +457,77 @@ export class ChunkLoader {
     return 3;
   }
 
-  // ── Mesh Creation ──────────────────────────────────────────────
+  // ── BatchedMesh Operations ────────────────────────────────────
 
   /**
-   * Create a Three.js Mesh from worker-produced ChunkMeshData.
-   * Uses shared material (vertex colors), positions chunk in world space.
+   * Add a chunk's geometry to the appropriate LOD BatchedMesh.
+   * Returns the entry with geometry/instance IDs, or null if the batch is full.
    */
-  private createMeshFromData(meshData: ChunkMeshData, cx: number, cy: number): THREE.Mesh {
+  private addToBatch(
+    cx: number,
+    cy: number,
+    lod: LODLevel,
+    meshData: ChunkMeshData,
+  ): LoadedChunkEntry | null {
+    const bm = this.batchedMeshes.get(lod);
+    if (!bm) return null;
+
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(meshData.positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(meshData.colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
 
-    const mesh = new THREE.Mesh(geometry, CHUNK_MATERIAL);
+    const budget = LOD_BUDGETS[lod];
 
-    // Chunk (0,0) starts at world x = -MAP_SIZE/2, z = -MAP_SIZE/2
-    mesh.position.set(
+    let geometryId: number;
+    try {
+      geometryId = bm.addGeometry(geometry, budget.vertsPerChunk, budget.indicesPerChunk);
+    } catch {
+      geometry.dispose();
+      return null;
+    }
+
+    let instanceId: number;
+    try {
+      instanceId = bm.addInstance(geometryId);
+    } catch {
+      bm.deleteGeometry(geometryId);
+      geometry.dispose();
+      return null;
+    }
+
+    // Position the instance at the chunk's world-space origin
+    this.tmpMatrix.makeTranslation(
       cx * CHUNK_SIZE - MAP_SIZE / 2,
       0,
       cy * CHUNK_SIZE - MAP_SIZE / 2,
     );
+    bm.setMatrixAt(instanceId, this.tmpMatrix);
 
-    mesh.frustumCulled = true;
-    mesh.matrixAutoUpdate = false;
-    mesh.updateMatrix();
+    // Dispose the temporary geometry (data has been copied into BatchedMesh)
+    geometry.dispose();
 
-    // Store chunk coords in userData for raycasting / debugging
-    mesh.userData = { cx, cy };
-
-    return mesh;
+    return { lod, geometryId, instanceId };
   }
 
-  // ── Cleanup Helpers ────────────────────────────────────────────
-
   /**
-   * Dispose GPU resources for a loaded chunk entry.
+   * Remove a chunk from its LOD BatchedMesh.
    */
-  private disposeEntry(entry: LoadedChunkEntry): void {
-    entry.mesh.geometry.dispose();
-    // Material is shared -- do NOT dispose it here
-    this.terrainGroup.remove(entry.mesh);
+  private removeFromBatch(entry: LoadedChunkEntry): void {
+    const bm = this.batchedMeshes.get(entry.lod);
+    if (!bm) return;
+
+    try {
+      bm.deleteGeometry(entry.geometryId);
+    } catch {
+      // Geometry may have already been removed
+    }
   }
 }
 
 // ── Utility ────────────────────────────────────────────────────────
 
-/**
- * Fast chunk key parser that avoids string split + Number conversion overhead.
- * ChunkKey is always `${number},${number}`.
- */
 function parseKeyFast(key: ChunkKey): { cx: number; cy: number } {
   const commaIdx = key.indexOf(',');
   return {

@@ -20,18 +20,31 @@ vi.mock('three', () => {
     dispose: vi.fn(),
   }));
   const BufferAttribute = vi.fn();
-  const Mesh = vi.fn(() => ({
-    position: { set: vi.fn() },
-    geometry: { dispose: vi.fn() },
-    frustumCulled: true,
-    matrixAutoUpdate: true,
-    updateMatrix: vi.fn(),
-    userData: {},
-  }));
   const MeshStandardMaterial = vi.fn(() => ({
     dispose: vi.fn(),
   }));
-  return { Group, Scene, BufferGeometry, BufferAttribute, Mesh, MeshStandardMaterial, FrontSide: 0 };
+  const Matrix4 = vi.fn(() => ({
+    makeTranslation: vi.fn().mockReturnThis(),
+  }));
+  const BatchedMesh = vi.fn(() => ({
+    name: '',
+    frustumCulled: true,
+    addGeometry: vi.fn().mockReturnValue(0),
+    addInstance: vi.fn().mockReturnValue(0),
+    setMatrixAt: vi.fn(),
+    deleteGeometry: vi.fn(),
+    dispose: vi.fn(),
+  }));
+  return {
+    Group,
+    Scene,
+    BufferGeometry,
+    BufferAttribute,
+    MeshStandardMaterial,
+    Matrix4,
+    BatchedMesh,
+    FrontSide: 0,
+  };
 });
 
 // Mock chunkMeshBuilder before importing ChunkLoader
@@ -42,6 +55,13 @@ vi.mock('../world/chunkMeshBuilder', () => ({
     colors: new Float32Array(12),
     indices: new Uint32Array(6),
   })),
+}));
+
+// Mock meshCache to resolve synchronously in tests
+vi.mock('../world/meshCache', () => ({
+  getCachedMesh: vi.fn(() => Promise.resolve(null)),
+  putCachedMesh: vi.fn(() => Promise.resolve()),
+  hashChunkData: vi.fn(() => 'testhash'),
 }));
 
 // Mock logger to suppress console output during tests
@@ -70,6 +90,9 @@ import { ChunkLoader } from '../world/chunkLoader';
 import { buildChunkMesh } from '../world/chunkMeshBuilder';
 import { BiomeType, type ChunkData } from '../types';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MockBatchedMesh = THREE.BatchedMesh as any as ReturnType<typeof vi.fn>;
+
 /**
  * Create a minimal ChunkData object for testing.
  */
@@ -84,6 +107,38 @@ function createMockChunkData(cx: number, cy: number): ChunkData {
   };
 }
 
+/**
+ * Helper: make the mock BatchedMesh return incrementing IDs to avoid collisions.
+ */
+function setupIncrementingIds(): void {
+  let geoId = 0;
+  let instId = 0;
+  const bmInstances = MockBatchedMesh.mock.results;
+  for (const result of bmInstances) {
+    const bm = result.value;
+    (bm.addGeometry as ReturnType<typeof vi.fn>).mockImplementation(() => geoId++);
+    (bm.addInstance as ReturnType<typeof vi.fn>).mockImplementation(() => instId++);
+  }
+}
+
+/**
+ * Flush microtask queue so async cache lookups resolve.
+ */
+async function flushMicrotasks(): Promise<void> {
+  await new Promise<void>(r => setTimeout(r, 0));
+}
+
+/**
+ * Run multiple update() calls with microtask flushing between each,
+ * so the async cache path resolves.
+ */
+async function updateNTimes(loader: ChunkLoader, n: number, x: number, z: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    loader.update(x, z);
+    await flushMicrotasks();
+  }
+}
+
 describe('ChunkLoader', () => {
   let scene: THREE.Scene;
   let loader: ChunkLoader;
@@ -92,6 +147,7 @@ describe('ChunkLoader', () => {
     vi.clearAllMocks();
     scene = new THREE.Scene();
     loader = new ChunkLoader(scene);
+    setupIncrementingIds();
   });
 
   describe('Constructor', () => {
@@ -99,6 +155,14 @@ describe('ChunkLoader', () => {
       expect(THREE.Group).toHaveBeenCalledTimes(1);
       expect(scene.add).toHaveBeenCalledWith(loader.terrainGroup);
       expect(loader.terrainGroup.name).toBe('terrain');
+    });
+
+    it('creates 4 BatchedMeshes (one per LOD level)', () => {
+      expect(THREE.BatchedMesh).toHaveBeenCalledTimes(4);
+    });
+
+    it('adds all BatchedMeshes to terrainGroup', () => {
+      expect(loader.terrainGroup.add).toHaveBeenCalledTimes(4);
     });
 
     it('uses default loadRadius of 8', () => {
@@ -140,9 +204,7 @@ describe('ChunkLoader', () => {
 
   describe('update()', () => {
     beforeEach(() => {
-      // Provide mock chunk data for all chunks in bounds
       loader.chunkDataProvider = (cx: number, cy: number) => {
-        // Return data for chunks within reasonable bounds
         if (cx >= 0 && cx < 64 && cy >= 0 && cy < 64) {
           return createMockChunkData(cx, cy);
         }
@@ -150,108 +212,68 @@ describe('ChunkLoader', () => {
       };
     });
 
-    it('loads chunks when camera is at world origin', () => {
-      // World (0, 0) maps to tile (1024, 1024) which is chunk (32, 32)
-      // Call update multiple times to allow loading (budget: 2 chunks/frame)
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
-      }
-
-      // At least some chunks should be loaded
+    it('loads chunks when camera is at world origin', async () => {
+      await updateNTimes(loader, 10, 0, 0);
       expect(loader.loadedCount).toBeGreaterThan(0);
     });
 
-    it('respects load budget of 2 chunks per frame', () => {
+    it('respects load budget of 2 chunks per frame', async () => {
       const initialCount = loader.loadedCount;
-
-      // Single update call should load at most 2 chunks
       loader.update(0, 0);
-
+      await flushMicrotasks();
       const loadedInFrame = loader.loadedCount - initialCount;
       expect(loadedInFrame).toBeLessThanOrEqual(2);
     });
 
-    it('does not re-trigger loading when called with same position twice', () => {
-      // First update
+    it('does not re-trigger loading when called with same position twice', async () => {
       loader.update(0, 0);
+      await flushMicrotasks();
       const countAfterFirst = loader.loadedCount;
-
-      // Second update with same position (should skip loading logic)
       loader.update(0, 0);
+      await flushMicrotasks();
       const countAfterSecond = loader.loadedCount;
-
-      // Count should not change if camera hasn't moved to new chunk
       expect(countAfterSecond).toBe(countAfterFirst);
     });
 
-    it('loads more chunks when camera moves to new chunk', () => {
-      // Start at origin
-      for (let i = 0; i < 5; i++) {
-        loader.update(0, 0);
-      }
+    it('loads more chunks when camera moves to new chunk', async () => {
+      await updateNTimes(loader, 5, 0, 0);
       const initialCount = loader.loadedCount;
 
-      // Move camera far enough to change chunk (32 world units = 1 chunk)
-      for (let i = 0; i < 5; i++) {
-        loader.update(64, 64);
-      }
+      await updateNTimes(loader, 5, 64, 64);
       const newCount = loader.loadedCount;
-
-      // Should have loaded more chunks around new position
       expect(newCount).toBeGreaterThan(initialCount);
     });
 
-    it('loads chunks within loadRadius', () => {
+    it('loads chunks within loadRadius', async () => {
       const smallLoader = new ChunkLoader(scene, { loadRadius: 2 });
+      setupIncrementingIds();
       smallLoader.chunkDataProvider = loader.chunkDataProvider;
 
-      // Load chunks around origin
-      for (let i = 0; i < 20; i++) {
-        smallLoader.update(0, 0);
-      }
+      await updateNTimes(smallLoader, 20, 0, 0);
 
       // With radius 2, should load (2*2+1)^2 = 25 chunks maximum
       expect(smallLoader.loadedCount).toBeLessThanOrEqual(25);
       expect(smallLoader.loadedCount).toBeGreaterThan(0);
     });
 
-    it('calls buildChunkMesh for each loaded chunk', () => {
-      loader.update(0, 0);
-      loader.update(0, 0);
-      loader.update(0, 0);
+    it('calls buildChunkMesh for each loaded chunk', async () => {
+      await updateNTimes(loader, 3, 0, 0);
 
-      // buildChunkMesh should be called for each loaded chunk
       expect(buildChunkMesh).toHaveBeenCalled();
       expect(vi.mocked(buildChunkMesh).mock.calls.length).toBeGreaterThan(0);
-    });
-
-    it('adds loaded chunks to terrainGroup', () => {
-      const addSpy = vi.spyOn(loader.terrainGroup, 'add');
-
-      for (let i = 0; i < 5; i++) {
-        loader.update(0, 0);
-      }
-
-      expect(addSpy).toHaveBeenCalled();
     });
   });
 
   describe('chunkDataProvider null handling', () => {
-    it('skips chunks when chunkDataProvider returns null', () => {
-      // Provider that returns null for all chunks
+    it('skips chunks when chunkDataProvider returns null', async () => {
       loader.chunkDataProvider = () => null;
 
-      // Attempt to load chunks
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
-      }
+      await updateNTimes(loader, 10, 0, 0);
 
-      // No chunks should be loaded
       expect(loader.loadedCount).toBe(0);
     });
 
-    it('loads only chunks where provider returns data', () => {
-      // Provider that returns data only for chunk (32, 32)
+    it('loads only chunks where provider returns data', async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx === 32 && cy === 32) {
           return createMockChunkData(cx, cy);
@@ -259,21 +281,14 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      // Load around origin (chunk 32, 32)
-      for (let i = 0; i < 20; i++) {
-        loader.update(0, 0);
-      }
+      await updateNTimes(loader, 20, 0, 0);
 
-      // Should load only the one chunk with data
       expect(loader.loadedCount).toBe(1);
     });
 
-    it('skips individual null chunks but loads others', () => {
-      // Provider that returns null for specific chunks
+    it('skips individual null chunks but loads others', async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
-        // Return data for chunks near center, but skip chunk (32,32) specifically
         if (cx >= 30 && cx <= 34 && cy >= 30 && cy <= 34) {
-          // Skip the center chunk (32,32) but provide others
           if (cx === 32 && cy === 32) {
             return null;
           }
@@ -282,17 +297,14 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      for (let i = 0; i < 25; i++) {
-        loader.update(0, 0);
-      }
+      await updateNTimes(loader, 25, 0, 0);
 
-      // Should load surrounding chunks but skip the center one
       expect(loader.loadedCount).toBeGreaterThan(0);
     });
   });
 
   describe('dispose()', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx >= 30 && cx <= 34 && cy >= 30 && cy <= 34) {
           return createMockChunkData(cx, cy);
@@ -300,17 +312,12 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      // Load some chunks
-      for (let i = 0; i < 20; i++) {
-        loader.update(0, 0);
-      }
+      await updateNTimes(loader, 20, 0, 0);
     });
 
     it('clears all loaded chunks', () => {
       expect(loader.loadedCount).toBeGreaterThan(0);
-
       loader.dispose();
-
       expect(loader.loadedCount).toBe(0);
     });
 
@@ -321,23 +328,35 @@ describe('ChunkLoader', () => {
 
     it('removes terrainGroup from parent scene', () => {
       const removeFromParentSpy = vi.spyOn(loader.terrainGroup, 'removeFromParent');
-
       loader.dispose();
-
       expect(removeFromParentSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('disposes geometry of loaded chunks', () => {
-      // Get all created meshes
-      const meshCalls = vi.mocked(THREE.Mesh).mock.results;
+    it('disposes all BatchedMeshes', () => {
+      const bmResults = MockBatchedMesh.mock.results;
+      const loaderBMs = bmResults.slice(-4);
 
       loader.dispose();
 
-      // All mesh geometries should be disposed
-      meshCalls.forEach(result => {
-        const mesh = result.value as THREE.Mesh;
-        expect(mesh.geometry.dispose).toHaveBeenCalled();
-      });
+      for (const result of loaderBMs) {
+        expect(result.value.dispose).toHaveBeenCalled();
+      }
+    });
+
+    it('calls deleteGeometry for loaded chunks during dispose', () => {
+      const bmResults = MockBatchedMesh.mock.results;
+      const loaderBMs = bmResults.slice(-4);
+
+      const initialLoadedCount = loader.loadedCount;
+      expect(initialLoadedCount).toBeGreaterThan(0);
+
+      loader.dispose();
+
+      let totalDeleteCalls = 0;
+      for (const result of loaderBMs) {
+        totalDeleteCalls += (result.value.deleteGeometry as ReturnType<typeof vi.fn>).mock.calls.length;
+      }
+      expect(totalDeleteCalls).toBeGreaterThanOrEqual(initialLoadedCount);
     });
 
     it('can be called multiple times safely', () => {
@@ -362,20 +381,16 @@ describe('ChunkLoader', () => {
       expect(loader.loadedCount).toBe(0);
     });
 
-    it('increases as chunks are loaded', () => {
+    it('increases as chunks are loaded', async () => {
       const initialCount = loader.loadedCount;
 
-      for (let i = 0; i < 5; i++) {
-        loader.update(0, 0);
-      }
+      await updateNTimes(loader, 5, 0, 0);
 
       expect(loader.loadedCount).toBeGreaterThan(initialCount);
     });
 
-    it('returns to zero after dispose', () => {
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
-      }
+    it('returns to zero after dispose', async () => {
+      await updateNTimes(loader, 10, 0, 0);
 
       loader.dispose();
 
@@ -397,12 +412,8 @@ describe('ChunkLoader', () => {
       expect(loader.pendingCount).toBe(0);
     });
 
-    it('returns to zero after loading completes', () => {
-      for (let i = 0; i < 20; i++) {
-        loader.update(0, 0);
-      }
-
-      // After loading completes, pending should be zero (synchronous loading)
+    it('returns to zero after loading completes', async () => {
+      await updateNTimes(loader, 20, 0, 0);
       expect(loader.pendingCount).toBe(0);
     });
 
@@ -422,49 +433,26 @@ describe('ChunkLoader', () => {
       };
     });
 
-    it('unloads distant chunks when camera moves far away', () => {
-      // Load chunks at origin (world 0,0 = chunk 32,32)
-      for (let i = 0; i < 20; i++) {
-        loader.update(0, 0);
-      }
+    it('unloads distant chunks when camera moves far away', async () => {
+      await updateNTimes(loader, 20, 0, 0);
       const initialCount = loader.loadedCount;
       expect(initialCount).toBeGreaterThan(0);
 
-      // Move camera very far (well beyond unloadRadius of 12 chunks)
-      // 500 world units = 15.6 chunks away, which exceeds unloadRadius
-      for (let i = 0; i < 30; i++) {
-        loader.update(500, 500);
-      }
+      await updateNTimes(loader, 30, 500, 500);
 
       const finalCount = loader.loadedCount;
-
-      // After moving far away, we should have loaded new chunks at new position
-      // and unloaded old chunks at origin. Total count should change.
-      // At minimum, we know chunks were loaded at the new position
       expect(finalCount).toBeGreaterThan(0);
-
-      // If no chunks remain from original position, counts will differ
-      // This verifies the unloading mechanism is working
-      const hasUnloadedOrReloaded = true; // The system maintains chunks around current position
-      expect(hasUnloadedOrReloaded).toBe(true);
     });
 
-    it('respects unloadRadius when removing chunks', () => {
+    it('respects unloadRadius when removing chunks', async () => {
       const customLoader = new ChunkLoader(scene, { loadRadius: 3, unloadRadius: 5 });
+      setupIncrementingIds();
       customLoader.chunkDataProvider = loader.chunkDataProvider;
 
-      // Load chunks at one position
-      for (let i = 0; i < 20; i++) {
-        customLoader.update(0, 0);
-      }
+      await updateNTimes(customLoader, 20, 0, 0);
 
-      // Move camera to trigger unloading
-      for (let i = 0; i < 30; i++) {
-        customLoader.update(500, 500);
-      }
+      await updateNTimes(customLoader, 30, 500, 500);
 
-      // Chunks beyond unloadRadius should be unloaded
-      // This is verified by the fact that the system doesn't crash
       expect(customLoader.loadedCount).toBeGreaterThanOrEqual(0);
     });
   });
@@ -479,17 +467,12 @@ describe('ChunkLoader', () => {
       };
     });
 
-    it('passes LOD level to buildChunkMesh based on distance', () => {
-      // Load chunks around origin
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
-      }
+    it('passes LOD level to buildChunkMesh based on distance', async () => {
+      await updateNTimes(loader, 10, 0, 0);
 
-      // Check that buildChunkMesh was called with LOD parameters
       const calls = vi.mocked(buildChunkMesh).mock.calls;
       expect(calls.length).toBeGreaterThan(0);
 
-      // Each call should have chunkData and LOD level
       calls.forEach(call => {
         expect(call[0]).toBeDefined(); // chunkData
         expect(typeof call[1]).toBe('number'); // lod level (0-3)
@@ -498,22 +481,17 @@ describe('ChunkLoader', () => {
       });
     });
 
-    it('uses lower LOD (0) for nearby chunks', () => {
-      // Load chunks very close to camera
-      for (let i = 0; i < 5; i++) {
-        loader.update(0, 0);
-      }
+    it('uses lower LOD (0) for nearby chunks', async () => {
+      await updateNTimes(loader, 5, 0, 0);
 
       const calls = vi.mocked(buildChunkMesh).mock.calls;
-
-      // At least some chunks should use LOD 0 (highest detail) for nearby chunks
       const hasLod0 = calls.some(call => call[1] === 0);
       expect(hasLod0).toBe(true);
     });
   });
 
   describe('edge cases', () => {
-    it('handles camera at negative world coordinates', () => {
+    it('handles camera at negative world coordinates', async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx >= 0 && cx < 64 && cy >= 0 && cy < 64) {
           return createMockChunkData(cx, cy);
@@ -521,14 +499,12 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      expect(() => {
-        for (let i = 0; i < 5; i++) {
-          loader.update(-1000, -1000);
-        }
-      }).not.toThrow();
+      await expect((async () => {
+        await updateNTimes(loader, 5, -1000, -1000);
+      })()).resolves.not.toThrow();
     });
 
-    it('handles camera at extreme positive coordinates', () => {
+    it('handles camera at extreme positive coordinates', async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx >= 0 && cx < 64 && cy >= 0 && cy < 64) {
           return createMockChunkData(cx, cy);
@@ -536,26 +512,22 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      expect(() => {
-        for (let i = 0; i < 5; i++) {
-          loader.update(3000, 3000);
-        }
-      }).not.toThrow();
+      await expect((async () => {
+        await updateNTimes(loader, 5, 3000, 3000);
+      })()).resolves.not.toThrow();
     });
 
-    it('handles empty chunkDataProvider gracefully', () => {
+    it('handles empty chunkDataProvider gracefully', async () => {
       loader.chunkDataProvider = () => null;
 
-      expect(() => {
-        for (let i = 0; i < 10; i++) {
-          loader.update(0, 0);
-        }
-      }).not.toThrow();
+      await expect((async () => {
+        await updateNTimes(loader, 10, 0, 0);
+      })()).resolves.not.toThrow();
 
       expect(loader.loadedCount).toBe(0);
     });
 
-    it('handles rapid camera movement', () => {
+    it('handles rapid camera movement', async () => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx >= 0 && cx < 64 && cy >= 0 && cy < 64) {
           return createMockChunkData(cx, cy);
@@ -563,16 +535,16 @@ describe('ChunkLoader', () => {
         return null;
       };
 
-      expect(() => {
-        // Simulate rapid camera movement across map
+      await expect((async () => {
         for (let i = 0; i < 10; i++) {
           loader.update(i * 100, i * 100);
+          await flushMicrotasks();
         }
-      }).not.toThrow();
+      })()).resolves.not.toThrow();
     });
   });
 
-  describe('mesh creation', () => {
+  describe('BatchedMesh integration', () => {
     beforeEach(() => {
       loader.chunkDataProvider = (cx: number, cy: number) => {
         if (cx === 32 && cy === 32) {
@@ -582,49 +554,48 @@ describe('ChunkLoader', () => {
       };
     });
 
-    it('creates mesh with correct Three.js components', () => {
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
-      }
+    it('creates BufferGeometry for mesh data before adding to batch', async () => {
+      await updateNTimes(loader, 10, 0, 0);
 
-      // BufferGeometry should be created
       expect(THREE.BufferGeometry).toHaveBeenCalled();
-
-      // BufferAttribute should be created for positions, normals, colors, indices
       expect(THREE.BufferAttribute).toHaveBeenCalled();
-
-      // Mesh should be created
-      expect(THREE.Mesh).toHaveBeenCalled();
     });
 
-    it('sets mesh position based on chunk coordinates', () => {
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
+    it('calls addGeometry and addInstance on BatchedMesh', async () => {
+      await updateNTimes(loader, 10, 0, 0);
+
+      const bmResults = MockBatchedMesh.mock.results;
+      let totalAddGeoCalls = 0;
+      let totalAddInstCalls = 0;
+      for (const result of bmResults) {
+        totalAddGeoCalls += (result.value.addGeometry as ReturnType<typeof vi.fn>).mock.calls.length;
+        totalAddInstCalls += (result.value.addInstance as ReturnType<typeof vi.fn>).mock.calls.length;
       }
 
-      const meshCalls = vi.mocked(THREE.Mesh).mock.results;
-      expect(meshCalls.length).toBeGreaterThan(0);
-
-      // Each mesh should have position set
-      meshCalls.forEach(result => {
-        const mesh = result.value as THREE.Mesh;
-        expect(mesh.position.set).toHaveBeenCalled();
-      });
+      expect(totalAddGeoCalls).toBeGreaterThan(0);
+      expect(totalAddInstCalls).toBeGreaterThan(0);
     });
 
-    it('stores chunk coordinates in mesh userData', () => {
-      for (let i = 0; i < 10; i++) {
-        loader.update(0, 0);
+    it('calls setMatrixAt to position instances', async () => {
+      await updateNTimes(loader, 10, 0, 0);
+
+      const bmResults = MockBatchedMesh.mock.results;
+      let totalSetMatrixCalls = 0;
+      for (const result of bmResults) {
+        totalSetMatrixCalls += (result.value.setMatrixAt as ReturnType<typeof vi.fn>).mock.calls.length;
       }
 
-      const meshCalls = vi.mocked(THREE.Mesh).mock.results;
+      expect(totalSetMatrixCalls).toBeGreaterThan(0);
+    });
 
-      meshCalls.forEach(result => {
-        const mesh = result.value as THREE.Mesh;
-        expect(mesh.userData).toBeDefined();
-        expect(typeof mesh.userData.cx).toBe('number');
-        expect(typeof mesh.userData.cy).toBe('number');
-      });
+    it('disposes temporary geometry after adding to batch', async () => {
+      await updateNTimes(loader, 10, 0, 0);
+
+      // All temp geometries should be disposed after being added to BatchedMesh
+      const geoResults = vi.mocked(THREE.BufferGeometry).mock.results;
+      for (const result of geoResults) {
+        expect(result.value.dispose).toHaveBeenCalled();
+      }
     });
   });
 });
