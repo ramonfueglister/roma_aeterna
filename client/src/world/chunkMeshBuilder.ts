@@ -194,7 +194,7 @@ export function buildChunkMesh(chunk: ChunkData, lod: LODLevel): ChunkMeshData {
       // Apply per-vertex noise using grid position for determinism
       const worldLx = gx * step;
       const worldLy = gy * step;
-      let [r, g, b] = applyColorNoise(baseR, baseG, baseB, worldLx, worldLy, h);
+      let [r, g, b] = applyColorNoise(baseR, baseG, baseB, worldLx, worldLy);
 
       // Empire border fog: look up province from the origin tile
       const localTileX = gx * step;

@@ -18,7 +18,7 @@
  *   - Duplicate edges are avoided (A->B but not B->A)
  *
  * Land roads sit at y=40 (slightly above average terrain).
- * Sea routes sit at y=WATER_LEVEL-1 (water surface level).
+ * Sea routes sit at y=WATER_LEVEL (water surface level, spec §5).
  */
 
 import * as THREE from 'three';
@@ -44,7 +44,7 @@ const ROAD_Y_FALLBACK = 40;
 const ROAD_HEIGHT_OFFSET = 2;
 
 /** Y position for sea routes (at water surface). */
-const SEA_ROUTE_Y = WATER_LEVEL - 1;
+const SEA_ROUTE_Y = WATER_LEVEL;
 
 /** Camera height below which land roads become visible. */
 const ROAD_VISIBILITY_HEIGHT = 2000;

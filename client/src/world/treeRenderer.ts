@@ -17,6 +17,10 @@
  *
  * One InstancedMesh per variant (7 draw calls max), each with merged
  * trunk + canopy geometry and baked vertex colors.
+ *
+ * PERF: InstancedMesh objects are pre-allocated ONCE with fixed capacity
+ * and reused across camera movements. Only instance matrices and
+ * mesh.count are updated -- no GPU resource churn or scene graph mutation.
  */
 
 import * as THREE from 'three';
@@ -52,6 +56,9 @@ const enum TreeVariant {
 
 /** Total number of tree variants. */
 const VARIANT_COUNT = 7;
+
+/** Max instances per variant (evenly divided from total budget). */
+const MAX_INSTANCES_PER_VARIANT = Math.ceil(DEFAULT_MAX_INSTANCES / VARIANT_COUNT);
 
 // ---------------------------------------------------------------------------
 // Colors
@@ -316,13 +323,20 @@ export class TreeRenderer {
   /** Tracks which chunks have already contributed trees. */
   private readonly loadedChunks: Set<string> = new Set();
 
-  /** Current InstancedMesh instances (one per variant). */
+  /**
+   * Pre-allocated InstancedMesh instances (one per variant).
+   * Created once via buildMeshes(), reused across all camera movements.
+   * NEVER disposed during normal operation -- only in dispose().
+   */
   private variantMeshes: Array<THREE.InstancedMesh | null> = new Array(VARIANT_COUNT).fill(null);
+
+  /** Whether meshes have been pre-allocated yet. */
+  private meshesBuilt = false;
 
   /** Maximum visible tree instances (across all variants). */
   private maxInstances: number = DEFAULT_MAX_INSTANCES;
 
-  /** Dirty flag: set when new chunk data arrives or maxInstances changes. */
+  /** Dirty flag: set when new chunk data arrives. */
   private dirty = true;
 
   /** Last camera position used for the rebuild check. */
@@ -429,8 +443,9 @@ export class TreeRenderer {
   }
 
   /**
-   * Per-frame update. Culls trees by camera distance and rebuilds
-   * InstancedMesh if the camera has moved significantly or data changed.
+   * Per-frame update. Culls trees by camera distance and updates
+   * pre-allocated InstancedMesh instance matrices if the camera has
+   * moved significantly or new chunk data arrived.
    */
   update(cameraX: number, cameraY: number, cameraZ: number): void {
     // Camera height > 3000: hide all trees
@@ -465,14 +480,21 @@ export class TreeRenderer {
     this.lastCamZ = cameraZ;
     this.dirty = false;
 
+    // Ensure meshes are pre-allocated before first use
+    if (!this.meshesBuilt) {
+      this.buildMeshes();
+    }
+
     this.rebuildInstances(cameraX, cameraZ, visRadius);
   }
 
   /**
-   * Dispose all GPU resources.
+   * Dispose all GPU resources. Only place where meshes + geometries
+   * are actually destroyed.
    */
   dispose(): void {
     this.disposeMeshes();
+    this.meshesBuilt = false;
     // Dispose singleton geometries
     for (let i = 0; i < VARIANT_COUNT; i++) {
       const geom = variantGeometries[i];
@@ -486,8 +508,37 @@ export class TreeRenderer {
   // -- Internal ------------------------------------------------------------
 
   /**
-   * Rebuild all InstancedMesh objects from the tree pool,
-   * filtered by distance to camera and capped at maxInstances.
+   * Pre-allocate all 7 InstancedMesh objects with fixed max capacity.
+   * Called once on first update. Meshes are added to the scene here and
+   * NEVER removed until dispose().
+   */
+  private buildMeshes(): void {
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      // Skip if already allocated (defensive)
+      if (this.variantMeshes[v]) continue;
+
+      const mesh = new THREE.InstancedMesh(
+        getVariantGeometry(v as TreeVariant),
+        TREE_MATERIAL,
+        MAX_INSTANCES_PER_VARIANT,
+      );
+      mesh.frustumCulled = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      // Start with zero visible instances
+      mesh.count = 0;
+      this.scene.add(mesh);
+      this.variantMeshes[v] = mesh;
+    }
+    this.meshesBuilt = true;
+  }
+
+  /**
+   * Update all pre-allocated InstancedMesh instance matrices from the
+   * tree pool, filtered by distance to camera and capped at maxInstances.
+   *
+   * No GPU resource allocation or scene graph mutation happens here --
+   * only matrix writes and mesh.count adjustments.
    */
   private rebuildInstances(
     camX: number,
@@ -521,38 +572,10 @@ export class TreeRenderer {
       ? candidates.slice(0, maxTotal)
       : candidates;
 
-    // Count per variant
-    const variantCounts = new Uint32Array(VARIANT_COUNT);
-
-    for (let i = 0; i < visible.length; i++) {
-      const entry = visible[i];
-      if (!entry) continue;
-      variantCounts[entry.tree.variant] = (variantCounts[entry.tree.variant] ?? 0) + 1;
-    }
-
-    // Dispose old meshes
-    this.disposeMeshes();
-
-    // Create new InstancedMesh per variant (only if count > 0)
-    for (let v = 0; v < VARIANT_COUNT; v++) {
-      const count = variantCounts[v]!;
-      if (count > 0) {
-        const mesh = new THREE.InstancedMesh(
-          getVariantGeometry(v as TreeVariant),
-          TREE_MATERIAL,
-          count,
-        );
-        mesh.frustumCulled = false;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        this.scene.add(mesh);
-        this.variantMeshes[v] = mesh;
-      }
-    }
-
-    // Fill instance matrices with per-instance scale variation
+    // Per-variant write index (tracks how many instances written per variant)
     const variantIndices = new Uint32Array(VARIANT_COUNT);
 
+    // Write instance matrices into pre-allocated meshes
     for (let i = 0; i < visible.length; i++) {
       const entry = visible[i];
       if (!entry) continue;
@@ -561,25 +584,41 @@ export class TreeRenderer {
       const mesh = this.variantMeshes[tree.variant];
       if (!mesh) continue;
 
+      const idx = variantIndices[tree.variant]!;
+
+      // Guard: do not exceed pre-allocated capacity
+      if (idx >= MAX_INSTANCES_PER_VARIANT) continue;
+
       // Per-instance scale variation: 0.8 - 1.2x based on tile hash
       const scaleFactor = 0.8 + tileHash(Math.floor(tree.worldX * 7), Math.floor(tree.worldZ * 13)) * 0.4;
 
       this.tmpMatrix.makeTranslation(tree.worldX, tree.worldY, tree.worldZ);
       this.tmpMatrix.scale(this.tmpScale.set(scaleFactor, scaleFactor, scaleFactor));
 
-      const idx = variantIndices[tree.variant]!;
       mesh.setMatrixAt(idx, this.tmpMatrix);
-      variantIndices[tree.variant] = (variantIndices[tree.variant] ?? 0) + 1;
+      variantIndices[tree.variant] = idx + 1;
     }
 
-    // Flag instance matrix buffers for upload
+    // Update mesh.count and flag instance matrix buffers for upload
     for (let v = 0; v < VARIANT_COUNT; v++) {
       const mesh = this.variantMeshes[v];
-      if (mesh) mesh.instanceMatrix.needsUpdate = true;
+      if (!mesh) continue;
+
+      const count = variantIndices[v]!;
+      mesh.count = count;
+      mesh.visible = true;
+
+      // Only flag for GPU upload if there are instances to draw
+      if (count > 0) {
+        mesh.instanceMatrix.needsUpdate = true;
+      }
     }
   }
 
-  /** Remove all InstancedMesh objects from the scene and release GPU resources. */
+  /**
+   * Remove all InstancedMesh objects from the scene and release GPU resources.
+   * Called ONLY from dispose() -- never during normal camera movement.
+   */
   private disposeMeshes(): void {
     for (let v = 0; v < VARIANT_COUNT; v++) {
       const mesh = this.variantMeshes[v];

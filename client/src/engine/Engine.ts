@@ -57,10 +57,10 @@ export class Engine {
     this.container.style.height = '100%';
     mountPoint.appendChild(this.container);
 
-    // Scene
+    // Scene — warm Mediterranean atmosphere per spec §22
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x0a1120, 800, 2000);
-    this.scene.background = new THREE.Color(0x07111b);
+    this.scene.fog = new THREE.Fog(0xc8b898, 800, 2000); // warm parchment fog
+    this.scene.background = new THREE.Color(0x87a5c0);   // warm sky blue
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(
@@ -87,9 +87,12 @@ export class Engine {
     const ambientLight = new THREE.AmbientLight(0x8c9bb4, 0.4);
     this.scene.add(ambientLight);
 
-    // Warm golden-hour directional sun from southwest (spec: RGB 255,248,235, intensity 1.0)
+    // Warm golden-hour directional sun from southwest (spec §22: RGB 255,248,235, intensity 1.0)
+    // Spec §22: 35° elevation from southwest
+    // tan(35°) ≈ 0.700, so Y = horizontal_distance * 0.700
+    // Horizontal distance = sqrt(1500² + 1200²) ≈ 1921, Y = 1921 * 0.700 ≈ 1345
     const sun = new THREE.DirectionalLight(0xfff8eb, 1.0);
-    sun.position.set(-1500, 3000, -1200);
+    sun.position.set(-1500, 1345, -1200);
 
     // Shadow map: covers a 600x600 area around the camera target
     sun.castShadow = true;
@@ -172,14 +175,21 @@ export class Engine {
 
     const deltaTime = this.clock.getDelta();
 
-    // Contact shadows: only at close zoom (< 500) per spec section 22
+    // Contact shadows: active < 300, fade to zero by 500 (spec §22)
     const camPos = this.camera.position;
     const shadowsNeeded = camPos.y < 500;
     if (this.sun.castShadow !== shadowsNeeded) {
       this.sun.castShadow = shadowsNeeded;
     }
     if (shadowsNeeded) {
-      this.sun.position.set(camPos.x - 300, 600, camPos.z - 240);
+      // Shadow fade 300→500: reduce shadow darkness via bias (spec §22)
+      const shadowFade = camPos.y < 300 ? 1.0 : 1.0 - (camPos.y - 300) / 200;
+      this.sun.shadow.bias = -0.0005 * shadowFade;
+      this.sun.shadow.normalBias = 0.5 + (1.0 - shadowFade) * 2.0;
+
+      // Dynamic sun: 35° elevation per spec §22
+      // Horizontal offset ~384 (sqrt(300²+240²)), Y = 384 * tan(35°) ≈ 269
+      this.sun.position.set(camPos.x - 300, camPos.y + 269, camPos.z - 240);
       this.sun.target.position.set(camPos.x, 0, camPos.z);
       this.sun.target.updateMatrixWorld();
     }

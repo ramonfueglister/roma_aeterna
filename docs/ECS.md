@@ -684,7 +684,7 @@ During migration, existing `GameSystem` classes may read ECS component data but 
 
 - Every chunk, city, agent, tree, province, resource site, the camera, and the water plane are ECS entities.
 - No game objects exist as standalone class instances outside the ECS world.
-- UI elements (HUD, info panel, minimap) are NOT entities — they remain DOM/canvas overlays.
+- UI elements (HUD, info panel) are NOT entities — they remain DOM overlays.
 
 ### System Execution Contract
 

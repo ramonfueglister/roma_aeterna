@@ -845,7 +845,7 @@ Layer 6:     solid fill, inset=0, overhang 1 south, color=roof (cornice)
 | + / - | Zoom in/out |
 | Space | Reset camera to default position (center of Mediterranean) |
 | Escape | Close info panel |
-| M | Toggle minimap |
+
 | P | Toggle province overlay |
 | T | Toggle trade routes |
 | R | Toggle resource icons |
@@ -873,7 +873,7 @@ Layer 6:     solid fill, inset=0, overhang 1 south, color=roof (cornice)
 
 ```
 ┌────────────────────────────────────────────────┐
-│ [Minimap 200x200]                    [Season] │
+│                                      [Season] │
 │                                      [Date]   │
 │                                      [Players]│
 │                                                │
@@ -914,15 +914,6 @@ Layer 6:     solid fill, inset=0, overhang 1 south, color=roof (cornice)
 │ [Close]           │
 └──────────────────┘
 ```
-
-### Minimap
-
-- 200x200 pixel fixed overlay (top-left or bottom-left)
-- Shows LOD3 terrain colors
-- White rectangle = current viewport
-- Dots for major cities
-- Click to jump to location
-- Toggle with M key
 
 ### Notifications (bottom center)
 
@@ -1298,15 +1289,15 @@ const { data: agents } = await supabase.rpc('agents_near_tile', {
 
 | Breakpoint | Width | Layout Rules |
 | ---------- | ----- | ------------ |
-| Desktop    | >= 1024px | Full HUD, minimap visible, right-side info panel |
-| Tablet     | 768--1023px | Compact HUD, smaller minimap, narrower info panel |
-| Mobile     | <= 767px | HUD condensed, minimap toggle-only, bottom sheet info panel |
+| Desktop    | >= 1024px | Full HUD, right-side info panel |
+| Tablet     | 768--1023px | Compact HUD, narrower info panel |
+| Mobile     | <= 767px | HUD condensed, bottom sheet info panel |
 
 ### Mobile UI Rules
 
 - Minimum touch target size: **44x44 CSS px**
 - Info panel on mobile opens as bottom sheet (max 60% viewport height)
-- Minimap defaults to hidden on mobile and is opened via explicit toggle
+
 - Notification stack max: 2 on mobile (3 on tablet/desktop)
 - Label density on mobile follows active quality profile (`Label cap` from Section 12)
 

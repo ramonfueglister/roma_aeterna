@@ -7,6 +7,11 @@
  *
  * One InstancedMesh per agent type = 5 draw calls maximum.
  * Agents only visible when camera < 2000 height.
+ *
+ * InstancedMesh objects are pre-allocated ONCE in the constructor with
+ * fixed max capacity. Per-frame updates write matrices in-place and set
+ * mesh.count to control how many instances are drawn. No GPU resource
+ * churn on camera movement.
  */
 
 import * as THREE from 'three';
@@ -27,9 +32,12 @@ import { InstancePool } from '../ecs/enums';
 // ── Constants ───────────────────────────────────────────────────
 
 const HALF_MAP = MAP_SIZE / 2;
-const WATER_Y = WATER_LEVEL - 1;
-const MAX_VISIBLE_HEIGHT = 2000;
-const CAMERA_MOVE_THRESHOLD = 40;
+const WATER_Y = WATER_LEVEL; // spec §5: water at sea level
+const MAX_VISIBLE_HEIGHT = 2000; // ships, legions, caravans
+const PEOPLE_VISIBLE_HEIGHT = 100; // spec §13: people visible < 100
+
+/** Number of agent model types. */
+const TYPE_COUNT = 5;
 
 /** Maps AgentModelType index → InstancePool ID for MeshRegistry. */
 const AGENT_POOL_IDS = [
@@ -185,21 +193,28 @@ function generateMockAgents(): MockAgent[] {
   return agents;
 }
 
+/**
+ * Count agents per type to determine pre-allocation capacity.
+ */
+function countAgentsByType(agents: MockAgent[]): number[] {
+  const counts = new Array<number>(TYPE_COUNT).fill(0);
+  for (const agent of agents) {
+    counts[agent.type] = (counts[agent.type] ?? 0) + 1;
+  }
+  return counts;
+}
+
 // ── Agent Renderer ──────────────────────────────────────────────
 
 export class AgentRenderer {
   private readonly scene: THREE.Scene;
   private readonly agents: MockAgent[];
 
-  private tradeShipMesh: THREE.InstancedMesh | null = null;
-  private fishingBoatMesh: THREE.InstancedMesh | null = null;
-  private citizenMesh: THREE.InstancedMesh | null = null;
-  private legionMesh: THREE.InstancedMesh | null = null;
-  private caravanMesh: THREE.InstancedMesh | null = null;
+  /** Pre-allocated meshes, one per agent type. Created once, never disposed until dispose(). */
+  private readonly meshes: (THREE.InstancedMesh | null)[];
 
-  private lastCamX = -99999;
-  private lastCamZ = -99999;
-  private wasVisible = false;
+  /** Max instance capacity per type (total agents of that type). */
+  private readonly maxCounts: number[];
 
   private readonly _mat4 = new THREE.Matrix4();
   private readonly _pos = new THREE.Vector3();
@@ -210,17 +225,20 @@ export class AgentRenderer {
   constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.agents = generateMockAgents();
+    this.maxCounts = countAgentsByType(this.agents);
+    this.meshes = new Array<THREE.InstancedMesh | null>(TYPE_COUNT).fill(null);
+
+    this.allocateMeshes();
   }
 
   /**
-   * Per-frame update. Animates agent positions and rebuilds instances
-   * when camera moves significantly.
+   * Per-frame update. Animates agent positions and writes visible
+   * instance matrices into pre-allocated meshes.
    */
   update(cameraX: number, cameraY: number, cameraZ: number, _elapsed: number): void {
     // Hide at high altitude
     if (cameraY > MAX_VISIBLE_HEIGHT) {
       this.hideAll();
-      this.wasVisible = false;
       return;
     }
 
@@ -233,24 +251,9 @@ export class AgentRenderer {
       agent.z += dz;
     }
 
-    // Check if camera moved enough to rebuild
-    const dx = cameraX - this.lastCamX;
-    const dz = cameraZ - this.lastCamZ;
-    const camMoved = dx * dx + dz * dz > CAMERA_MOVE_THRESHOLD * CAMERA_MOVE_THRESHOLD;
-
-    if (!camMoved && this.wasVisible) {
-      // Just update instance matrices for animation
-      this.updateInstanceMatrices();
-      return;
-    }
-
-    this.lastCamX = cameraX;
-    this.lastCamZ = cameraZ;
-
     // Visibility radius based on camera height
     const visRadius = Math.min(600, cameraY * 0.8);
-    this.rebuildInstances(cameraX, cameraZ, visRadius);
-    this.wasVisible = true;
+    this.updateInstances(cameraX, cameraZ, visRadius, cameraY);
   }
 
   dispose(): void {
@@ -260,22 +263,12 @@ export class AgentRenderer {
 
   // ── Internal ──────────────────────────────────────────────────
 
-  private rebuildInstances(camX: number, camZ: number, visRadius: number): void {
-    this.disposeMeshes();
-
-    const visRadiusSq = visRadius * visRadius;
-
-    // Filter visible agents by type
-    const byType: MockAgent[][] = [[], [], [], [], []];
-    for (const agent of this.agents) {
-      const dx = agent.x - camX;
-      const dz = agent.z - camZ;
-      if (dx * dx + dz * dz <= visRadiusSq) {
-        byType[agent.type]!.push(agent);
-      }
-    }
-
-    // Create InstancedMesh per type
+  /**
+   * Pre-allocate one InstancedMesh per agent type with max capacity.
+   * Called once from the constructor. Meshes are added to the scene
+   * and registered in MeshRegistry here and never removed until dispose().
+   */
+  private allocateMeshes(): void {
     const geoGetters = [
       getTradeShipGeometry,
       getFishingBoatGeometry,
@@ -284,92 +277,106 @@ export class AgentRenderer {
       getCaravanGeometry,
     ];
 
-    const meshRefs: (THREE.InstancedMesh | null)[] = [null, null, null, null, null];
-
-    for (let t = 0; t < 5; t++) {
-      const agents = byType[t]!;
-      if (agents.length === 0) continue;
+    for (let t = 0; t < TYPE_COUNT; t++) {
+      const maxCount = this.maxCounts[t]!;
+      if (maxCount === 0) continue;
 
       const geo = geoGetters[t]!();
-      const mesh = new THREE.InstancedMesh(geo, AGENT_MATERIAL, agents.length);
+      const mesh = new THREE.InstancedMesh(geo, AGENT_MATERIAL, maxCount);
       mesh.frustumCulled = false;
       mesh.castShadow = true;
 
-      for (let i = 0; i < agents.length; i++) {
-        const a = agents[i]!;
-        this._euler.set(0, a.angle, 0);
-        this._quat.setFromEuler(this._euler);
-        this._pos.set(a.x, a.y || WATER_Y, a.z);
-        this._mat4.compose(this._pos, this._quat, this._scale);
-        mesh.setMatrixAt(i, this._mat4);
-      }
+      // Start with zero visible instances
+      mesh.count = 0;
 
-      mesh.instanceMatrix.needsUpdate = true;
       this.scene.add(mesh);
-      meshRefs[t] = mesh;
+      this.meshes[t] = mesh;
 
-      // Register in ECS MeshRegistry
+      // Register in ECS MeshRegistry once
       registerInstancePool(AGENT_POOL_IDS[t]!, mesh);
     }
-
-    this.tradeShipMesh = meshRefs[0] ?? null;
-    this.fishingBoatMesh = meshRefs[1] ?? null;
-    this.citizenMesh = meshRefs[2] ?? null;
-    this.legionMesh = meshRefs[3] ?? null;
-    this.caravanMesh = meshRefs[4] ?? null;
   }
 
-  private updateInstanceMatrices(): void {
-    const meshes = [
-      this.tradeShipMesh,
-      this.fishingBoatMesh,
-      this.citizenMesh,
-      this.legionMesh,
-      this.caravanMesh,
-    ];
+  /**
+   * Unified per-frame instance update. Filters visible agents by distance,
+   * writes their matrices into pre-allocated meshes, and sets mesh.count
+   * to the number of visible agents per type.
+   *
+   * No InstancedMesh creation, disposal, scene.add, or scene.remove.
+   */
+  private updateInstances(camX: number, camZ: number, visRadius: number, cameraY: number): void {
+    const visRadiusSq = visRadius * visRadius;
+    // Spec §13: people (citizens) only visible when camera < PEOPLE_VISIBLE_HEIGHT
+    const showPeople = cameraY < PEOPLE_VISIBLE_HEIGHT;
 
-    for (const mesh of meshes) {
-      if (mesh) {
+    // Per-type write cursors
+    const cursors = new Array<number>(TYPE_COUNT).fill(0);
+
+    // Single pass: write matrices for all visible agents
+    for (const agent of this.agents) {
+      // Per-type height visibility: citizens only at close zoom
+      if (agent.type === AgentModelType.CITIZEN && !showPeople) continue;
+
+      const dx = agent.x - camX;
+      const dz = agent.z - camZ;
+      if (dx * dx + dz * dz > visRadiusSq) continue;
+
+      const mesh = this.meshes[agent.type];
+      if (!mesh) continue;
+
+      const idx = cursors[agent.type]!;
+      this._euler.set(0, agent.angle, 0);
+      this._quat.setFromEuler(this._euler);
+      this._pos.set(agent.x, agent.y || WATER_Y, agent.z);
+      this._mat4.compose(this._pos, this._quat, this._scale);
+      mesh.setMatrixAt(idx, this._mat4);
+      cursors[agent.type] = idx + 1;
+    }
+
+    // Update counts and mark matrices dirty
+    for (let t = 0; t < TYPE_COUNT; t++) {
+      const mesh = this.meshes[t];
+      if (!mesh) continue;
+
+      const visibleCount = cursors[t]!;
+      mesh.count = visibleCount;
+
+      if (visibleCount > 0) {
         mesh.instanceMatrix.needsUpdate = true;
+        mesh.visible = true;
+      } else {
+        mesh.visible = false;
       }
     }
   }
 
+  /**
+   * Hide all agent meshes by setting count to zero.
+   * No scene removal or disposal.
+   */
   private hideAll(): void {
-    const meshes = [
-      this.tradeShipMesh,
-      this.fishingBoatMesh,
-      this.citizenMesh,
-      this.legionMesh,
-      this.caravanMesh,
-    ];
-    for (const mesh of meshes) {
-      if (mesh) mesh.visible = false;
+    for (let t = 0; t < TYPE_COUNT; t++) {
+      const mesh = this.meshes[t];
+      if (mesh) {
+        mesh.count = 0;
+        mesh.visible = false;
+      }
     }
   }
 
+  /**
+   * Full disposal of meshes. Only called from dispose().
+   * Removes from scene, unregisters from MeshRegistry, and disposes GPU resources.
+   */
   private disposeMeshes(): void {
-    const meshes = [
-      this.tradeShipMesh,
-      this.fishingBoatMesh,
-      this.citizenMesh,
-      this.legionMesh,
-      this.caravanMesh,
-    ];
-
-    for (let t = 0; t < meshes.length; t++) {
-      const mesh = meshes[t];
+    for (let t = 0; t < TYPE_COUNT; t++) {
+      const mesh = this.meshes[t];
       if (mesh) {
         unregisterInstancePool(AGENT_POOL_IDS[t]!);
         this.scene.remove(mesh);
         mesh.dispose();
+        this.meshes[t] = null;
       }
     }
-
-    this.tradeShipMesh = null;
-    this.fishingBoatMesh = null;
-    this.citizenMesh = null;
-    this.legionMesh = null;
-    this.caravanMesh = null;
   }
 }

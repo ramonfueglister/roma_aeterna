@@ -41,7 +41,7 @@ describe('biomeColorRGB', () => {
 describe('applyColorNoise', () => {
   it('returns values in 0-1 range', () => {
     for (let i = 0; i < 100; i++) {
-      const [r, g, b] = applyColorNoise(0.5, 0.5, 0.5, i, i * 3, i * 7);
+      const [r, g, b] = applyColorNoise(0.5, 0.5, 0.5, i, i * 3);
       expect(r).toBeGreaterThanOrEqual(0);
       expect(r).toBeLessThanOrEqual(1);
       expect(g).toBeGreaterThanOrEqual(0);
@@ -52,14 +52,24 @@ describe('applyColorNoise', () => {
   });
 
   it('is deterministic for same coordinates', () => {
-    const a = applyColorNoise(0.5, 0.5, 0.5, 10, 20, 30);
-    const b = applyColorNoise(0.5, 0.5, 0.5, 10, 20, 30);
+    const a = applyColorNoise(0.5, 0.5, 0.5, 10, 20);
+    const b = applyColorNoise(0.5, 0.5, 0.5, 10, 20);
     expect(a).toEqual(b);
   });
 
   it('varies for different coordinates', () => {
-    const a = applyColorNoise(0.5, 0.5, 0.5, 0, 0, 0);
-    const b = applyColorNoise(0.5, 0.5, 0.5, 100, 100, 100);
+    const a = applyColorNoise(0.5, 0.5, 0.5, 0, 0);
+    const b = applyColorNoise(0.5, 0.5, 0.5, 100, 100);
     expect(a).not.toEqual(b);
+  });
+
+  it('uses multiplicative application per spec §23', () => {
+    // With variation = 0, result should equal input (base * 1.0)
+    // Test that results are close to base color (multiplicative, not additive)
+    const [r, g, b] = applyColorNoise(0.8, 0.6, 0.4, 42, 42);
+    // With ±5% noise, values should be within 5% of base
+    expect(r).toBeCloseTo(0.8, 1);
+    expect(g).toBeCloseTo(0.6, 1);
+    expect(b).toBeCloseTo(0.4, 1);
   });
 });

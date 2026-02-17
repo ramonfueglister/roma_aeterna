@@ -65,12 +65,13 @@ function createChunkMaterial(): THREE.MeshStandardMaterial {
     metalness: 0.02,
     side: THREE.FrontSide,
     transparent: true,
-    depthWrite: true,
+    depthWrite: false, // spec §2: depthWrite=false on fading LOD layers
   });
 }
 
-/** LOD boundary distances in chunk units (matches getLOD thresholds). */
-const LOD_BOUNDARIES = [2, 5, 9] as const;
+/** LOD boundary distances in chunk units (spec §2: 300/1000/3000 world units). */
+// 300 world / 32 chunk ≈ 9, 1000/32 ≈ 31, 3000/32 ≈ 94
+const LOD_BOUNDARIES = [9, 31, 94] as const;
 
 /** Transition half-range in chunk units (~150 world units / 32 chunk size). */
 const LOD_BLEND_CHUNKS = LOD_TRANSITION_RANGE / CHUNK_SIZE;
@@ -85,10 +86,11 @@ const LOD_BUDGETS: Record<LODLevel, {
   vertsPerChunk: number;
   indicesPerChunk: number;
 }> = {
-  0: { maxChunks: 80,  vertsPerChunk: 5000,  indicesPerChunk: 8000 },
-  1: { maxChunks: 120, vertsPerChunk: 1500,  indicesPerChunk: 2500 },
-  2: { maxChunks: 200, vertsPerChunk: 500,   indicesPerChunk: 800 },
-  3: { maxChunks: 200, vertsPerChunk: 12,    indicesPerChunk: 12 },
+  // Sized to fit spec §2 LOD distance thresholds (300/1000/3000 units)
+  0: { maxChunks: 150, vertsPerChunk: 5000,  indicesPerChunk: 8000 },
+  1: { maxChunks: 250, vertsPerChunk: 1500,  indicesPerChunk: 2500 },
+  2: { maxChunks: 400, vertsPerChunk: 500,   indicesPerChunk: 800 },
+  3: { maxChunks: 400, vertsPerChunk: 12,    indicesPerChunk: 12 },
 };
 
 // ── Pre-computed spiral offsets ────────────────────────────────────
@@ -576,9 +578,10 @@ export class ChunkLoader {
   }
 
   private getLOD(chunkDistance: number): LODLevel {
-    if (chunkDistance <= 2) return 0;
-    if (chunkDistance <= 5) return 1;
-    if (chunkDistance <= 9) return 2;
+    // Spec §2: LOD0 < 300 units (9 chunks), LOD1 300-1000 (31), LOD2 1000-3000 (94)
+    if (chunkDistance <= 9) return 0;
+    if (chunkDistance <= 31) return 1;
+    if (chunkDistance <= 94) return 2;
     return 3;
   }
 

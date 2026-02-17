@@ -583,7 +583,6 @@ client/
     │
     ├── ui/
     │   ├── HUD.ts                 # Top-level HUD container
-    │   ├── Minimap.ts             # 200x200 minimap overlay
     │   ├── InfoPanel.ts           # Right-side city/province info panel
     │   ├── Notifications.ts       # Bottom-center world event notifications
     │   ├── Compass.ts             # Compass indicator

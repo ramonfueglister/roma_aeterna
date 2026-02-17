@@ -48,19 +48,25 @@ export function biomeColorRGB(biome: BiomeType): [number, number, number] {
 
 /**
  * Apply per-vertex color noise (±5% RGB variation).
- * Deterministic based on position for consistency across LODs.
+ * Deterministic based on tile position for consistency across LODs.
+ *
+ * Spec §23: hash = (tile_x * 73856093 ^ tile_y * 19349663) / MAX_UINT
+ * Multiplicative application: color * (1.0 + variation)
  */
 export function applyColorNoise(
   r: number, g: number, b: number,
-  x: number, y: number, z: number,
+  tileX: number, tileY: number,
 ): [number, number, number] {
-  // Simple hash-based noise, deterministic per position
-  const hash = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
-  const noise = (hash - Math.floor(hash)) * 0.1 - 0.05; // ±5%
+  // Integer XOR hash per spec §23
+  const hash = ((tileX * 73856093) ^ (tileY * 19349663)) >>> 0;
+  const noise = hash / 4294967296; // normalize to [0, 1)
+  const variation = (noise - 0.5) * 0.10; // ±5% variation
+
+  // Multiplicative application per spec §23
   return [
-    Math.max(0, Math.min(1, r + noise)),
-    Math.max(0, Math.min(1, g + noise * 0.8)),
-    Math.max(0, Math.min(1, b + noise * 0.6)),
+    Math.max(0, Math.min(1, r * (1.0 + variation))),
+    Math.max(0, Math.min(1, g * (1.0 + variation * 0.8))),
+    Math.max(0, Math.min(1, b * (1.0 + variation * 0.6))),
   ];
 }
 

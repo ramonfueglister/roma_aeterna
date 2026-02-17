@@ -35,8 +35,12 @@ const DECELERATION_TIME = 0.2;
 const EVENT_DEBOUNCE_MS = 100;
 const BOUNDARY_SPRING_K = 0.15;
 const BOUNDARY_HARD_LIMIT = 100;
-const STRATEGIC_POLAR_ANGLE = Math.PI * 0.35;
-const TACTICAL_POLAR_ANGLE = Math.PI * 0.48;
+// Spec §3: 80° strategic (near-overhead) → 45° detail (angled view)
+// Polar angle = angle from vertical Y axis: 0°=top-down, 90°=horizontal
+// 80° from vertical = nearly overhead at strategic zoom
+// 45° from vertical = angled view at detail zoom
+const STRATEGIC_POLAR_ANGLE = (80 / 180) * Math.PI;  // ~1.396 rad (80°)
+const TACTICAL_POLAR_ANGLE = (45 / 180) * Math.PI;   // ~0.785 rad (45°)
 const STRATEGIC_HEIGHT = 2000;
 const TACTICAL_HEIGHT = 500;
 const PRESET_ANIMATION_DURATION = 1.5;

@@ -188,22 +188,15 @@ function getProvince(provinces: Uint8Array, lx: number, lz: number): number {
 // ── Ambient Occlusion ──────────────────────────────────────────────
 
 /**
- * AO darkening factor for per-vertex ambient occlusion.
- * 1.0 = no occlusion, lower = darker.  The factor is multiplied into
- * vertex color after face shading.
- */
-const AO_STRENGTH = 0.78;
-
-/**
  * Compute per-vertex AO for a top-face corner.
+ *
+ * Spec §4: AO factor = 1.0 - (neighbor_count * 0.15)
+ *   0 neighbors → 1.0, 1 → 0.85, 2 → 0.70, 3 → 0.55
  *
  * For a corner at local (lx, lz), check the 3 neighboring columns
  * that share this corner: side1, side2, and the diagonal.  If any
  * neighbor is taller than the current column height, that neighbor
  * occludes the corner.
- *
- * Returns a multiplier in [AO_STRENGTH, 1.0] where lower = more
- * occluded.
  *
  * See: https://0fps.net/2013/07/03/ambient-occlusion-for-minecraft-like-worlds/
  */
@@ -222,8 +215,8 @@ function computeTopFaceAO(
     : (getHeight(heights, lx + dxSide1 + dxSide2, lz + dzSide1 + dzSide2) > cornerHeight ? 1 : 0);
 
   const occluders = s1 + s2 + corner; // 0..3
-  // Map 0 → 1.0, 1 → lerp, 2 → lerp, 3 → AO_STRENGTH
-  return 1.0 - (occluders / 3) * (1.0 - AO_STRENGTH);
+  // Spec §4: factor = 1.0 - (neighbor_count * 0.15)
+  return 1.0 - occluders * 0.15;
 }
 
 // ── Quad Emitter ───────────────────────────────────────────────────
@@ -265,9 +258,10 @@ function emitQuad(
   const sb = bb * shade;
 
   // Per-vertex: AO -> noise -> empire border fog -> map edge fade
+  // Spec §23: applyColorNoise takes tile position (x, z) not vertex position
 
   // Vertex 0
-  let [r0, g0, b0] = applyColorNoise(sr * ao0, sg * ao0, sb * ao0, x0, y0, z0);
+  let [r0, g0, b0] = applyColorNoise(sr * ao0, sg * ao0, sb * ao0, x0, z0);
   [r0, g0, b0] = applyEmpireBorderFog(r0, g0, b0, provinceId, distToBorder);
   [r0, g0, b0] = applyMapEdgeFade(r0, g0, b0, x0, z0);
   scratchPositions.push3(x0, y0, z0);
@@ -275,7 +269,7 @@ function emitQuad(
   scratchColors.push3(r0, g0, b0);
 
   // Vertex 1
-  let [r1, g1, b1] = applyColorNoise(sr * ao1, sg * ao1, sb * ao1, x1, y1, z1);
+  let [r1, g1, b1] = applyColorNoise(sr * ao1, sg * ao1, sb * ao1, x1, z1);
   [r1, g1, b1] = applyEmpireBorderFog(r1, g1, b1, provinceId, distToBorder);
   [r1, g1, b1] = applyMapEdgeFade(r1, g1, b1, x1, z1);
   scratchPositions.push3(x1, y1, z1);
@@ -283,7 +277,7 @@ function emitQuad(
   scratchColors.push3(r1, g1, b1);
 
   // Vertex 2
-  let [r2, g2, b2] = applyColorNoise(sr * ao2, sg * ao2, sb * ao2, x2, y2, z2);
+  let [r2, g2, b2] = applyColorNoise(sr * ao2, sg * ao2, sb * ao2, x2, z2);
   [r2, g2, b2] = applyEmpireBorderFog(r2, g2, b2, provinceId, distToBorder);
   [r2, g2, b2] = applyMapEdgeFade(r2, g2, b2, x2, z2);
   scratchPositions.push3(x2, y2, z2);
@@ -291,7 +285,7 @@ function emitQuad(
   scratchColors.push3(r2, g2, b2);
 
   // Vertex 3
-  let [r3, g3, b3] = applyColorNoise(sr * ao3, sg * ao3, sb * ao3, x3, y3, z3);
+  let [r3, g3, b3] = applyColorNoise(sr * ao3, sg * ao3, sb * ao3, x3, z3);
   [r3, g3, b3] = applyEmpireBorderFog(r3, g3, b3, provinceId, distToBorder);
   [r3, g3, b3] = applyMapEdgeFade(r3, g3, b3, x3, z3);
   scratchPositions.push3(x3, y3, z3);
@@ -603,7 +597,8 @@ function emitSideQuad(
   //
   // Side-face AO: the top edge (v0, v1 at yTop) gets subtle darkening where
   // the side meets the top surface — a concave edge that traps light.
-  const sideAO = AO_STRENGTH + (1.0 - AO_STRENGTH) * 0.5; // softer than full AO
+  // Spec §4: 1 neighbor = 0.85. Side edges approximate 1-neighbor occlusion.
+  const sideAO = 0.85;
 
   switch (face) {
     case FaceDir.NORTH: {

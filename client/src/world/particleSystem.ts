@@ -26,6 +26,7 @@ import {
   cos,
   sin,
   mod,
+  mix,
   smoothstep,
   length,
   select,
@@ -40,8 +41,8 @@ import { CITY_DATABASE } from './cityDatabase';
 
 const HALF_MAP = MAP_SIZE / 2;
 
-/** Camera height above which all particles are hidden. */
-const MAX_VISIBLE_HEIGHT = 2000;
+/** Camera height above which all particles are hidden (spec §13: smoke < 500). */
+const MAX_VISIBLE_HEIGHT = 500;
 
 /** Radius around camera within which particles are rendered. */
 const VISIBLE_RADIUS = 600;
@@ -55,8 +56,8 @@ const SMOKE_PER_CITY = 5;
 /** Maximum number of coastal bird particles. */
 const MAX_BIRDS = 30;
 
-/** Camera height threshold below which desert dust spawns. */
-const DUST_CAMERA_HEIGHT = 200;
+/** Camera height threshold below which desert dust spawns (spec §13: < 300). */
+const DUST_CAMERA_HEIGHT = 300;
 
 // ── Particle type IDs ──────────────────────────────────────────
 
@@ -125,13 +126,14 @@ export class ParticleSystem {
         positions[idx * 3 + 1] = baseY + Math.random() * 3;
         positions[idx * 3 + 2] = cz + (Math.random() - 0.5) * 6;
 
-        velocities[idx * 3] = (Math.random() - 0.5) * 0.4;
-        velocities[idx * 3 + 1] = 0.8 + Math.random() * 0.6;
-        velocities[idx * 3 + 2] = (Math.random() - 0.5) * 0.4;
+        // Spec §13: rise speed 0.3 voxels/frame, wind drift 0.05 eastward
+        velocities[idx * 3] = 0.05 + (Math.random() - 0.5) * 0.1;  // eastward wind drift
+        velocities[idx * 3 + 1] = 0.3 + Math.random() * 0.15;       // rise speed ~0.3
+        velocities[idx * 3 + 2] = (Math.random() - 0.5) * 0.1;
 
         types[idx] = TYPE_SMOKE;
-        lives[idx] = Math.random() * 12;
-        maxLives[idx] = 8 + Math.random() * 6;
+        lives[idx] = Math.random() * 5;
+        maxLives[idx] = 3 + Math.random() * 2; // spec §13: lifetime 3-5 seconds
         idx++;
       }
     }
@@ -210,11 +212,16 @@ export class ParticleSystem {
     this.material.positionNode = positionFn();
 
     // ── Size Node ─────────────────────────────────────────────
-    // Point size by type: dust=2, smoke=3, birds=4
+    // Spec §13: smoke 2x2x2 voxels, scale 1.0→2.5 over life; birds ~4px
     const sizeFn = Fn(() => {
       const pType = aType;
+      const life = aLife;
+      const maxLife = aMaxLife;
+      // Smoke scale animation: 1.0 at spawn → 2.5 at end (spec §13)
+      const smokeT = mod(uElapsed.add(life), maxLife).div(maxLife);
+      const smokeSize = mix(float(2.0), float(5.0), smokeT); // 2px base * (1.0→2.5)
       return select(pType.lessThan(0.5), float(2.0),
-        select(pType.lessThan(1.5), float(3.0), float(4.0)));
+        select(pType.lessThan(1.5), smokeSize, float(4.0)));
     });
 
     this.material.sizeNode = sizeFn();
@@ -223,10 +230,19 @@ export class ParticleSystem {
     // Color by type, alpha by life phase + distance culling
     const colorFn = Fn(() => {
       const pType = aType;
+      const life = aLife;
+      const maxLife = aMaxLife;
+      // Smoke color fades: (180,180,180) at spawn → (220,220,220) at end (spec §13)
+      const smokeT = mod(uElapsed.add(life), maxLife).div(maxLife);
+      const smokeColor = mix(
+        vec3(180 / 255, 180 / 255, 180 / 255),
+        vec3(220 / 255, 220 / 255, 220 / 255),
+        smokeT,
+      );
       return select(pType.lessThan(0.5),
         vec3(0.82, 0.72, 0.53),      // Desert dust: sandy
         select(pType.lessThan(1.5),
-          vec3(0.35, 0.33, 0.32),    // City smoke: dark gray
+          smokeColor,                  // City smoke: spec §13 gray gradient
           vec3(0.15, 0.13, 0.12),    // Coastal birds: dark specks
         ),
       );
@@ -263,12 +279,18 @@ export class ParticleSystem {
 
       // Radius-based culling
       const inRadius = distSq.lessThan(radiusSq);
-      // Camera height culling
-      const belowMaxHeight = uCameraPos.y.lessThan(float(MAX_VISIBLE_HEIGHT));
-      // Dust: additional height check
+      // Per-type camera height culling (spec §13)
       const isDust = pType.lessThan(0.5);
+      const isSmoke = pType.greaterThanEqual(0.5).and(pType.lessThan(1.5));
+      const isBirdType = pType.greaterThan(1.5);
+      // Dust: visible < 300 (DUST_CAMERA_HEIGHT)
       const dustVisible = uCameraPos.y.lessThan(float(DUST_CAMERA_HEIGHT));
-      const typeVisible = select(isDust, dustVisible, float(1.0));
+      // Smoke: visible < 500 (MAX_VISIBLE_HEIGHT) per spec §13
+      const smokeVisible = uCameraPos.y.lessThan(float(MAX_VISIBLE_HEIGHT));
+      // Birds: visible < 300 per spec §13
+      const birdTypeVisible = uCameraPos.y.lessThan(float(300.0));
+      const typeVisible = select(isDust, dustVisible,
+        select(isSmoke, smokeVisible, select(isBirdType, birdTypeVisible, float(1.0))));
 
       // Distance fade
       const distFade = float(1.0).sub(smoothstep(radiusSq.mul(0.5), radiusSq, distSq));
@@ -280,7 +302,7 @@ export class ParticleSystem {
 
       // Combine all factors
       const baseAlpha = fadeIn.mul(fadeOut).mul(distFade).mul(circle);
-      return select(inRadius, select(belowMaxHeight, baseAlpha.mul(typeVisible), float(0)), float(0));
+      return select(inRadius, baseAlpha.mul(typeVisible), float(0));
     });
 
     this.material.opacityNode = opacityFn();

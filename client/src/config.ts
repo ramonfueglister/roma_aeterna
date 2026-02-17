@@ -14,8 +14,8 @@ export const CHUNK_BYTES = 4104; // 8 header + 4 * 1024 data
 
 // ── LOD ─────────────────────────────────────────────────────────
 export const LOD_LEVELS = 4;
-export const LOD_DISTANCES = [200, 500, 1000, Infinity] as const;
-export const LOD_TRANSITION_RANGE = 150; // alpha blend zone in world units
+export const LOD_DISTANCES = [300, 1000, 3000, Infinity] as const;
+export const LOD_TRANSITION_RANGE = 200; // alpha blend zone in world units (spec §2: 200-500)
 
 // ── Camera ──────────────────────────────────────────────────────
 export const DEFAULT_CAMERA_HEIGHT = 1800;
@@ -23,7 +23,7 @@ export const MIN_ZOOM = 50;
 export const MAX_ZOOM = 5000;
 export const FAR_CLIP = 12000;
 export const NEAR_CLIP = 0.5;
-export const CAMERA_FOV = 45;
+export const CAMERA_FOV = 60; // spec §3: 60° strategic, lerps to 40° detail
 
 // ── Rendering ───────────────────────────────────────────────────
 export const MAX_DRAW_CALLS = 50;

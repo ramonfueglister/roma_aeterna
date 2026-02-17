@@ -7,6 +7,10 @@
  *   Detail (close)   - scaled octahedrons + glow + building clusters
  *
  * City data is imported from the separate cityData module.
+ *
+ * Performance: All InstancedMesh objects are pre-allocated once and kept alive.
+ * Zone changes toggle mesh.visible. Camera movement within a zone updates
+ * mesh.count and instance matrices in-place -- no teardown/rebuild.
  */
 
 import * as THREE from 'three';
@@ -57,6 +61,10 @@ const enum ViewZone {
   Detail = 2,
 }
 
+// ── All valid tiers ─────────────────────────────────────────────
+
+const ALL_TIERS: readonly CityTier[] = [1, 2, 3, 4];
+
 // ── Shared geometry builders ────────────────────────────────────
 
 function createDiamondGeometry(size: number): THREE.BufferGeometry {
@@ -84,12 +92,46 @@ function createOctahedronGeometry(size: number): THREE.BufferGeometry {
   return new THREE.OctahedronGeometry(size / 2, 0);
 }
 
-// ── Per-culture instanced mesh set ──────────────────────────────
+// ── Mesh key for culture+tier combination ───────────────────────
+
+function meshKey(culture: CultureType, tier: CityTier): string {
+  return `${culture}:${tier}`;
+}
+
+// ── Pre-allocated mesh pair (strategic diamond + tactical/detail octahedron) ─
+
+interface PreallocatedTierMesh {
+  /** Diamond InstancedMesh for strategic view. */
+  readonly strategic: THREE.InstancedMesh;
+  /** Octahedron InstancedMesh for tactical view. */
+  readonly tactical: THREE.InstancedMesh;
+  /** Octahedron InstancedMesh for detail view (scaled 1.5x). */
+  readonly detail: THREE.InstancedMesh;
+  /** Cities of this culture+tier (fixed, known at init). */
+  readonly cities: readonly CityData[];
+  /** Max instance count (= cities.length). */
+  readonly maxCount: number;
+}
+
+/** Pre-allocated glow lines mesh per culture. */
+interface PreallocatedGlowMesh {
+  /** Glow InstancedMesh for tactical view. */
+  readonly tactical: THREE.InstancedMesh;
+  /** Glow InstancedMesh for detail view (higher opacity). */
+  readonly detail: THREE.InstancedMesh;
+  /** All cities of this culture (flat, not per-tier). */
+  readonly cities: readonly CityData[];
+  /** Max instance count (= cities.length). */
+  readonly maxCount: number;
+}
+
+// ── Per-culture set (kept for backward compat with CultureMeshSet fields) ───
 
 interface CultureMeshSet {
   readonly culture: CultureType;
   readonly color: THREE.Color;
   readonly cities: readonly CityData[];
+  // Legacy fields kept for reference; actual meshes live in preallocated maps.
   strategicMesh: THREE.InstancedMesh | null;
   tacticalMesh: THREE.InstancedMesh | null;
   glowLines: THREE.InstancedMesh | null;
@@ -127,6 +169,16 @@ export class CityRenderer {
   private readonly strategicMaterial: THREE.MeshBasicMaterial;
   private readonly tacticalMaterial: THREE.MeshStandardMaterial;
   private readonly glowMaterial: THREE.MeshBasicMaterial;
+
+  /** Pre-allocated InstancedMesh objects: one per culture+tier for strategic/tactical/detail. */
+  private readonly tierMeshes: ReadonlyMap<string, PreallocatedTierMesh>;
+  /** Pre-allocated glow line meshes: one per culture for tactical, one for detail. */
+  private readonly glowMeshes: ReadonlyMap<CultureType, PreallocatedGlowMesh>;
+  /** Cloned materials kept alive for the lifetime of the renderer. */
+  private readonly clonedMaterials: THREE.Material[] = [];
+
+  /** Whether lazy init of meshes has been performed. */
+  private meshesInitialized = false;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -180,8 +232,7 @@ export class CityRenderer {
     // Create shared geometries per tier
     const dGeos = new Map<CityTier, THREE.BufferGeometry>();
     const oGeos = new Map<CityTier, THREE.BufferGeometry>();
-    const tiers: readonly CityTier[] = [1, 2, 3, 4];
-    for (const t of tiers) {
+    for (const t of ALL_TIERS) {
       const size = TIER_SIZES[t];
       dGeos.set(t, createDiamondGeometry(size));
       oGeos.set(t, createOctahedronGeometry(size));
@@ -192,7 +243,7 @@ export class CityRenderer {
     // Glow line geometry (thin tall cylinder)
     this.glowGeo = new THREE.CylinderGeometry(0.8, 0.8, 60, 4);
 
-    // Materials
+    // Base materials (cloned per culture during mesh allocation)
     this.strategicMaterial = new THREE.MeshBasicMaterial({
       vertexColors: false,
       transparent: true,
@@ -215,11 +266,168 @@ export class CityRenderer {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
+
+    // Pre-allocate all meshes (deferred to first update so the constructor stays fast;
+    // the maps are assigned here with empty placeholders to satisfy readonly).
+    this.tierMeshes = new Map();
+    this.glowMeshes = new Map();
+  }
+
+  // ── Lazy mesh pre-allocation ──────────────────────────────────
+
+  /**
+   * Creates all InstancedMesh objects once and adds them to the group.
+   * Called on first update(). After this, meshes are never destroyed until dispose().
+   */
+  private initMeshes(): void {
+    if (this.meshesInitialized) return;
+    this.meshesInitialized = true;
+
+    const tierMeshes = this.tierMeshes as Map<string, PreallocatedTierMesh>;
+    const glowMeshes = this.glowMeshes as Map<CultureType, PreallocatedGlowMesh>;
+
+    for (const [culture, set] of this.cultureSets) {
+      // Group cities by tier for this culture
+      const byTier = this.groupByTier(set.cities);
+
+      // --- Tier meshes (strategic diamond + tactical/detail octahedron) ---
+      for (const tier of ALL_TIERS) {
+        const tierCities = byTier.get(tier);
+        if (!tierCities || tierCities.length === 0) continue;
+
+        const maxCount = tierCities.length;
+        const key = meshKey(culture, tier);
+
+        const diamondGeo = this.diamondGeos.get(tier);
+        const octaGeo = this.octaGeos.get(tier);
+        if (!diamondGeo || !octaGeo) continue;
+
+        // Clone materials once per culture+tier
+        const strategicMat = this.strategicMaterial.clone();
+        strategicMat.color.copy(set.color);
+        this.clonedMaterials.push(strategicMat);
+
+        const tacticalMat = this.tacticalMaterial.clone();
+        tacticalMat.color.copy(set.color);
+        this.clonedMaterials.push(tacticalMat);
+
+        const detailMat = this.tacticalMaterial.clone();
+        detailMat.color.copy(set.color);
+        detailMat.opacity = 1.0;
+        this.clonedMaterials.push(detailMat);
+
+        // Strategic InstancedMesh (diamond geometry)
+        const strategicIM = new THREE.InstancedMesh(diamondGeo, strategicMat, maxCount);
+        strategicIM.frustumCulled = false;
+        strategicIM.count = 0;
+        strategicIM.visible = false;
+        strategicIM.userData['culture'] = culture;
+
+        // Tactical InstancedMesh (octahedron geometry)
+        const tacticalIM = new THREE.InstancedMesh(octaGeo, tacticalMat, maxCount);
+        tacticalIM.frustumCulled = false;
+        tacticalIM.count = 0;
+        tacticalIM.visible = false;
+        tacticalIM.userData['culture'] = culture;
+
+        // Detail InstancedMesh (octahedron geometry, scaled 1.5x)
+        const detailIM = new THREE.InstancedMesh(octaGeo, detailMat, maxCount);
+        detailIM.frustumCulled = false;
+        detailIM.count = 0;
+        detailIM.visible = false;
+        detailIM.userData['culture'] = culture;
+
+        this.group.add(strategicIM);
+        this.group.add(tacticalIM);
+        this.group.add(detailIM);
+
+        tierMeshes.set(key, {
+          strategic: strategicIM,
+          tactical: tacticalIM,
+          detail: detailIM,
+          cities: tierCities,
+          maxCount,
+        });
+      }
+
+      // --- Glow line meshes (one per culture, not per tier) ---
+      if (set.cities.length > 0) {
+        const maxGlowCount = set.cities.length;
+
+        const tacticalGlowMat = this.glowMaterial.clone();
+        tacticalGlowMat.color.copy(set.color);
+        this.clonedMaterials.push(tacticalGlowMat);
+
+        const detailGlowMat = this.glowMaterial.clone();
+        detailGlowMat.color.copy(set.color);
+        detailGlowMat.opacity = 0.6;
+        this.clonedMaterials.push(detailGlowMat);
+
+        const tacticalGlowIM = new THREE.InstancedMesh(
+          this.glowGeo, tacticalGlowMat, maxGlowCount,
+        );
+        tacticalGlowIM.frustumCulled = false;
+        tacticalGlowIM.count = 0;
+        tacticalGlowIM.visible = false;
+        tacticalGlowIM.raycast = () => { /* glow lines are not pickable */ };
+
+        const detailGlowIM = new THREE.InstancedMesh(
+          this.glowGeo, detailGlowMat, maxGlowCount,
+        );
+        detailGlowIM.frustumCulled = false;
+        detailGlowIM.count = 0;
+        detailGlowIM.visible = false;
+        detailGlowIM.raycast = () => { /* glow lines are not pickable */ };
+
+        this.group.add(tacticalGlowIM);
+        this.group.add(detailGlowIM);
+
+        glowMeshes.set(culture, {
+          tactical: tacticalGlowIM,
+          detail: detailGlowIM,
+          cities: set.cities,
+          maxCount: maxGlowCount,
+        });
+      }
+    }
+
+    // Populate strategic meshes immediately (all cities, never changes)
+    this.populateStrategicMeshes();
+  }
+
+  /**
+   * Write instance matrices for ALL cities into strategic meshes.
+   * This only runs once at init since strategic view shows every city.
+   */
+  private populateStrategicMeshes(): void {
+    for (const [, entry] of this.tierMeshes) {
+      const cityMap: Record<number, CityData> = {};
+
+      for (let i = 0; i < entry.cities.length; i++) {
+        const c = entry.cities[i];
+        if (!c) continue;
+        const pos = this.cityWorldPositions.get(c.id);
+        if (!pos) continue;
+
+        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
+        entry.strategic.setMatrixAt(i, this._mat4);
+        cityMap[i] = c;
+      }
+
+      entry.strategic.count = entry.cities.length;
+      entry.strategic.instanceMatrix.needsUpdate = true;
+      entry.strategic.userData['cityMap'] = cityMap;
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────
 
   update(cameraHeight: number, cameraX: number, cameraZ: number): void {
+    // Lazy init on first call
+    if (!this.meshesInitialized) {
+      this.initMeshes();
+    }
+
     const zone = cameraHeight > STRATEGIC_HEIGHT
       ? ViewZone.Strategic
       : cameraHeight > TACTICAL_HEIGHT
@@ -230,12 +438,14 @@ export class CityRenderer {
       || Math.abs(cameraZ - this.lastCameraZ) > 50;
 
     if (zone !== this.currentZone) {
-      this.rebuildMeshes(zone, cameraX, cameraZ);
+      // Zone changed: toggle mesh visibility, repopulate range-filtered meshes
+      this.activateZone(zone, cameraX, cameraZ);
       this.updateBuildings(zone, cameraX, cameraZ);
       this.currentZone = zone;
       this.lastCameraX = cameraX;
       this.lastCameraZ = cameraZ;
     } else if (zone !== ViewZone.Strategic && cameraMoved) {
+      // Camera moved within tactical/detail: update instance counts in-place
       this.updateInstanceVisibility(zone, cameraX, cameraZ);
       if (zone === ViewZone.Detail) {
         this.updateBuildings(zone, cameraX, cameraZ);
@@ -332,25 +542,258 @@ export class CityRenderer {
     }
     this.glowGeo.dispose();
 
-    // Dispose shared materials
+    // Dispose shared base materials
     this.strategicMaterial.dispose();
     this.tacticalMaterial.dispose();
     this.glowMaterial.dispose();
 
+    // Dispose cloned materials
+    for (const mat of this.clonedMaterials) {
+      mat.dispose();
+    }
+    this.clonedMaterials.length = 0;
+
     this.scene.remove(this.group);
   }
 
-  // ── Internal mesh management ────────────────────────────────
+  // ── Internal: zone activation (visibility toggling) ───────────
 
-  private clearAllMeshes(): void {
-    for (const [, set] of this.cultureSets) {
-      this.disposeInstancedMesh(set.strategicMesh);
-      this.disposeInstancedMesh(set.tacticalMesh);
-      this.disposeInstancedMesh(set.glowLines);
-      (set as { strategicMesh: THREE.InstancedMesh | null }).strategicMesh = null;
-      (set as { tacticalMesh: THREE.InstancedMesh | null }).tacticalMesh = null;
-      (set as { glowLines: THREE.InstancedMesh | null }).glowLines = null;
+  /**
+   * Activate a zone by toggling mesh.visible flags and populating
+   * range-filtered instances for tactical/detail zones.
+   * No InstancedMesh objects are created or destroyed.
+   */
+  private activateZone(zone: ViewZone, cameraX: number, cameraZ: number): void {
+    // First hide everything
+    this.hideAllMeshes();
+
+    switch (zone) {
+      case ViewZone.Strategic:
+        this.showStrategicMeshes();
+        break;
+      case ViewZone.Tactical:
+        this.populateTacticalMeshes(cameraX, cameraZ);
+        this.showTacticalMeshes();
+        break;
+      case ViewZone.Detail:
+        this.populateDetailMeshes(cameraX, cameraZ);
+        this.showDetailMeshes();
+        break;
     }
+  }
+
+  /**
+   * Hide all pre-allocated meshes by setting visible = false.
+   */
+  private hideAllMeshes(): void {
+    for (const [, entry] of this.tierMeshes) {
+      entry.strategic.visible = false;
+      entry.tactical.visible = false;
+      entry.detail.visible = false;
+    }
+    for (const [, entry] of this.glowMeshes) {
+      entry.tactical.visible = false;
+      entry.detail.visible = false;
+    }
+  }
+
+  private showStrategicMeshes(): void {
+    for (const [, entry] of this.tierMeshes) {
+      if (entry.strategic.count > 0) {
+        entry.strategic.visible = true;
+      }
+    }
+  }
+
+  private showTacticalMeshes(): void {
+    for (const [, entry] of this.tierMeshes) {
+      if (entry.tactical.count > 0) {
+        entry.tactical.visible = true;
+      }
+    }
+    for (const [, entry] of this.glowMeshes) {
+      if (entry.tactical.count > 0) {
+        entry.tactical.visible = true;
+      }
+    }
+  }
+
+  private showDetailMeshes(): void {
+    for (const [, entry] of this.tierMeshes) {
+      if (entry.detail.count > 0) {
+        entry.detail.visible = true;
+      }
+    }
+    for (const [, entry] of this.glowMeshes) {
+      if (entry.detail.count > 0) {
+        entry.detail.visible = true;
+      }
+    }
+  }
+
+  // ── Internal: range-filtered mesh population ──────────────────
+
+  /**
+   * Populate tactical InstancedMesh instances for cities within TACTICAL_RANGE.
+   * Updates mesh.count and cityMap in-place.
+   */
+  private populateTacticalMeshes(cameraX: number, cameraZ: number): void {
+    const rangeSq = TACTICAL_RANGE * TACTICAL_RANGE;
+
+    for (const [, entry] of this.tierMeshes) {
+      const cityMap: Record<number, CityData> = {};
+      let idx = 0;
+
+      for (let i = 0; i < entry.cities.length; i++) {
+        const c = entry.cities[i];
+        if (!c) continue;
+        const pos = this.cityWorldPositions.get(c.id);
+        if (!pos) continue;
+
+        const dx = pos.x - cameraX;
+        const dz = pos.z - cameraZ;
+        if (dx * dx + dz * dz > rangeSq) continue;
+
+        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
+        entry.tactical.setMatrixAt(idx, this._mat4);
+        cityMap[idx] = c;
+        idx++;
+      }
+
+      entry.tactical.count = idx;
+      if (idx > 0) {
+        entry.tactical.instanceMatrix.needsUpdate = true;
+      }
+      entry.tactical.userData['cityMap'] = cityMap;
+    }
+
+    // Glow lines for tactical view
+    for (const [, entry] of this.glowMeshes) {
+      let idx = 0;
+
+      for (let i = 0; i < entry.cities.length; i++) {
+        const c = entry.cities[i];
+        if (!c) continue;
+        const pos = this.cityWorldPositions.get(c.id);
+        if (!pos) continue;
+
+        const dx = pos.x - cameraX;
+        const dz = pos.z - cameraZ;
+        if (dx * dx + dz * dz > rangeSq) continue;
+
+        this._mat4.makeTranslation(pos.x, pos.y + 30, pos.z);
+        entry.tactical.setMatrixAt(idx, this._mat4);
+        idx++;
+      }
+
+      entry.tactical.count = idx;
+      if (idx > 0) {
+        entry.tactical.instanceMatrix.needsUpdate = true;
+      }
+    }
+  }
+
+  /**
+   * Populate detail InstancedMesh instances for cities within DETAIL_RANGE.
+   * Uses 1.5x scale on octahedrons.
+   */
+  private populateDetailMeshes(cameraX: number, cameraZ: number): void {
+    const rangeSq = DETAIL_RANGE * DETAIL_RANGE;
+    const scaleFactor = 1.5;
+
+    for (const [, entry] of this.tierMeshes) {
+      const cityMap: Record<number, CityData> = {};
+      let idx = 0;
+
+      for (let i = 0; i < entry.cities.length; i++) {
+        const c = entry.cities[i];
+        if (!c) continue;
+        const pos = this.cityWorldPositions.get(c.id);
+        if (!pos) continue;
+
+        const dx = pos.x - cameraX;
+        const dz = pos.z - cameraZ;
+        if (dx * dx + dz * dz > rangeSq) continue;
+
+        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
+        this._mat4.scale(this._vec3.set(scaleFactor, scaleFactor, scaleFactor));
+        entry.detail.setMatrixAt(idx, this._mat4);
+        cityMap[idx] = c;
+        idx++;
+      }
+
+      entry.detail.count = idx;
+      if (idx > 0) {
+        entry.detail.instanceMatrix.needsUpdate = true;
+      }
+      entry.detail.userData['cityMap'] = cityMap;
+    }
+
+    // Glow lines for detail view
+    for (const [, entry] of this.glowMeshes) {
+      let idx = 0;
+
+      for (let i = 0; i < entry.cities.length; i++) {
+        const c = entry.cities[i];
+        if (!c) continue;
+        const pos = this.cityWorldPositions.get(c.id);
+        if (!pos) continue;
+
+        const dx = pos.x - cameraX;
+        const dz = pos.z - cameraZ;
+        if (dx * dx + dz * dz > rangeSq) continue;
+
+        this._mat4.makeTranslation(pos.x, pos.y + 30, pos.z);
+        entry.detail.setMatrixAt(idx, this._mat4);
+        idx++;
+      }
+
+      entry.detail.count = idx;
+      if (idx > 0) {
+        entry.detail.instanceMatrix.needsUpdate = true;
+      }
+    }
+  }
+
+  // ── Internal: in-place visibility update (hot path) ───────────
+
+  /**
+   * Called when the camera moves within tactical or detail zone.
+   * Updates instance matrices and counts in-place without creating
+   * or destroying any InstancedMesh objects.
+   */
+  private updateInstanceVisibility(
+    zone: ViewZone,
+    cameraX: number,
+    cameraZ: number,
+  ): void {
+    if (zone === ViewZone.Tactical) {
+      this.populateTacticalMeshes(cameraX, cameraZ);
+      // Re-toggle visibility in case counts changed from 0 to >0 or vice versa
+      for (const [, entry] of this.tierMeshes) {
+        entry.tactical.visible = entry.tactical.count > 0;
+      }
+      for (const [, entry] of this.glowMeshes) {
+        entry.tactical.visible = entry.tactical.count > 0;
+      }
+    } else if (zone === ViewZone.Detail) {
+      this.populateDetailMeshes(cameraX, cameraZ);
+      for (const [, entry] of this.tierMeshes) {
+        entry.detail.visible = entry.detail.count > 0;
+      }
+      for (const [, entry] of this.glowMeshes) {
+        entry.detail.visible = entry.detail.count > 0;
+      }
+    }
+  }
+
+  // ── Internal: cleanup (only for dispose) ──────────────────────
+
+  /**
+   * Removes all pre-allocated meshes from the group.
+   * Only called from dispose() -- never during normal operation.
+   */
+  private clearAllMeshes(): void {
     // Remove all children from group
     while (this.group.children.length > 0) {
       const child = this.group.children[0];
@@ -358,37 +801,27 @@ export class CityRenderer {
         this.group.remove(child);
       }
     }
+
+    // Clear maps (mutable cast for cleanup)
+    (this.tierMeshes as Map<string, PreallocatedTierMesh>).clear();
+    (this.glowMeshes as Map<CultureType, PreallocatedGlowMesh>).clear();
+
+    this.meshesInitialized = false;
   }
 
-  private disposeInstancedMesh(mesh: THREE.InstancedMesh | null): void {
-    if (mesh) {
-      // Geometry is shared, don't dispose it here
-      // Material is shared, don't dispose it here
-      if (mesh.parent) {
-        mesh.parent.remove(mesh);
+  // ── Utilities ───────────────────────────────────────────────
+
+  private groupByTier(cities: readonly CityData[]): Map<CityTier, CityData[]> {
+    const map = new Map<CityTier, CityData[]>();
+    for (const c of cities) {
+      const arr = map.get(c.tier);
+      if (arr) {
+        arr.push(c);
+      } else {
+        map.set(c.tier, [c]);
       }
     }
-  }
-
-  private rebuildMeshes(zone: ViewZone, cameraX: number, cameraZ: number): void {
-    this.clearAllMeshes();
-
-    for (const [, set] of this.cultureSets) {
-      const filteredCities = this.filterCitiesByZone(set.cities, zone, cameraX, cameraZ);
-      if (filteredCities.length === 0) continue;
-
-      switch (zone) {
-        case ViewZone.Strategic:
-          this.buildStrategicMeshes(set, filteredCities);
-          break;
-        case ViewZone.Tactical:
-          this.buildTacticalMeshes(set, filteredCities);
-          break;
-        case ViewZone.Detail:
-          this.buildDetailMeshes(set, filteredCities);
-          break;
-      }
-    }
+    return map;
   }
 
   private filterCitiesByZone(
@@ -398,7 +831,6 @@ export class CityRenderer {
     cameraZ: number,
   ): CityData[] {
     if (zone === ViewZone.Strategic) {
-      // Show all cities at strategic zoom
       return [...cities];
     }
 
@@ -416,199 +848,5 @@ export class CityRenderer {
       }
     }
     return result;
-  }
-
-  private buildStrategicMeshes(set: CultureMeshSet, cities: readonly CityData[]): void {
-    // Group cities by tier for correct geometry sizing
-    const byTier = this.groupByTier(cities);
-
-    for (const [tier, tierCities] of byTier) {
-      if (tierCities.length === 0) continue;
-
-      const geo = this.diamondGeos.get(tier);
-      if (!geo) continue;
-
-      const mat = this.strategicMaterial.clone();
-      mat.color.copy(set.color);
-
-      const mesh = new THREE.InstancedMesh(geo, mat, tierCities.length);
-      mesh.frustumCulled = false;
-
-      const cityMap: Record<number, CityData> = {};
-
-      for (let i = 0; i < tierCities.length; i++) {
-        const c = tierCities[i];
-        if (!c) continue;
-        const pos = this.cityWorldPositions.get(c.id);
-        if (!pos) continue;
-
-        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
-        mesh.setMatrixAt(i, this._mat4);
-        cityMap[i] = c;
-      }
-
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.userData['cityMap'] = cityMap;
-      mesh.userData['culture'] = set.culture;
-
-      this.group.add(mesh);
-
-      // Store only the last tier mesh reference (the renderer mainly
-      // needs the group for raycasting; individual references are
-      // for potential future optimisations).
-      (set as { strategicMesh: THREE.InstancedMesh | null }).strategicMesh = mesh;
-    }
-  }
-
-  private buildTacticalMeshes(set: CultureMeshSet, cities: readonly CityData[]): void {
-    const byTier = this.groupByTier(cities);
-
-    for (const [tier, tierCities] of byTier) {
-      if (tierCities.length === 0) continue;
-
-      const geo = this.octaGeos.get(tier);
-      if (!geo) continue;
-
-      // Octahedron marker mesh
-      const markerMat = this.tacticalMaterial.clone();
-      markerMat.color.copy(set.color);
-
-      const mesh = new THREE.InstancedMesh(geo, markerMat, tierCities.length);
-      mesh.frustumCulled = false;
-
-      const cityMap: Record<number, CityData> = {};
-
-      for (let i = 0; i < tierCities.length; i++) {
-        const c = tierCities[i];
-        if (!c) continue;
-        const pos = this.cityWorldPositions.get(c.id);
-        if (!pos) continue;
-
-        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
-        mesh.setMatrixAt(i, this._mat4);
-        cityMap[i] = c;
-      }
-
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.userData['cityMap'] = cityMap;
-      mesh.userData['culture'] = set.culture;
-
-      this.group.add(mesh);
-      (set as { tacticalMesh: THREE.InstancedMesh | null }).tacticalMesh = mesh;
-    }
-
-    // Glow lines for all cities in this culture set
-    if (cities.length > 0) {
-      const glowMat = this.glowMaterial.clone();
-      glowMat.color.copy(set.color);
-
-      const glowMesh = new THREE.InstancedMesh(this.glowGeo, glowMat, cities.length);
-      glowMesh.frustumCulled = false;
-      glowMesh.raycast = () => { /* glow lines are not pickable */ };
-
-      for (let i = 0; i < cities.length; i++) {
-        const c = cities[i];
-        if (!c) continue;
-        const pos = this.cityWorldPositions.get(c.id);
-        if (!pos) continue;
-
-        this._mat4.makeTranslation(pos.x, pos.y + 30, pos.z);
-        glowMesh.setMatrixAt(i, this._mat4);
-      }
-
-      glowMesh.instanceMatrix.needsUpdate = true;
-      this.group.add(glowMesh);
-      (set as { glowLines: THREE.InstancedMesh | null }).glowLines = glowMesh;
-    }
-  }
-
-  private buildDetailMeshes(set: CultureMeshSet, cities: readonly CityData[]): void {
-    // In detail view use the octahedron geometry scaled up slightly
-    const byTier = this.groupByTier(cities);
-
-    for (const [tier, tierCities] of byTier) {
-      if (tierCities.length === 0) continue;
-
-      const geo = this.octaGeos.get(tier);
-      if (!geo) continue;
-
-      const mat = this.tacticalMaterial.clone();
-      mat.color.copy(set.color);
-      mat.opacity = 1.0;
-
-      const mesh = new THREE.InstancedMesh(geo, mat, tierCities.length);
-      mesh.frustumCulled = false;
-
-      const cityMap: Record<number, CityData> = {};
-      const scaleFactor = 1.5;
-
-      for (let i = 0; i < tierCities.length; i++) {
-        const c = tierCities[i];
-        if (!c) continue;
-        const pos = this.cityWorldPositions.get(c.id);
-        if (!pos) continue;
-
-        this._mat4.makeTranslation(pos.x, pos.y, pos.z);
-        this._mat4.scale(this._vec3.set(scaleFactor, scaleFactor, scaleFactor));
-        mesh.setMatrixAt(i, this._mat4);
-        cityMap[i] = c;
-      }
-
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.userData['cityMap'] = cityMap;
-      mesh.userData['culture'] = set.culture;
-
-      this.group.add(mesh);
-      (set as { tacticalMesh: THREE.InstancedMesh | null }).tacticalMesh = mesh;
-    }
-
-    // Glow lines in detail view too
-    if (cities.length > 0) {
-      const glowMat = this.glowMaterial.clone();
-      glowMat.color.copy(set.color);
-      glowMat.opacity = 0.6;
-
-      const glowMesh = new THREE.InstancedMesh(this.glowGeo, glowMat, cities.length);
-      glowMesh.frustumCulled = false;
-      glowMesh.raycast = () => { /* not pickable */ };
-
-      for (let i = 0; i < cities.length; i++) {
-        const c = cities[i];
-        if (!c) continue;
-        const pos = this.cityWorldPositions.get(c.id);
-        if (!pos) continue;
-
-        this._mat4.makeTranslation(pos.x, pos.y + 30, pos.z);
-        glowMesh.setMatrixAt(i, this._mat4);
-      }
-
-      glowMesh.instanceMatrix.needsUpdate = true;
-      this.group.add(glowMesh);
-      (set as { glowLines: THREE.InstancedMesh | null }).glowLines = glowMesh;
-    }
-  }
-
-  private updateInstanceVisibility(
-    zone: ViewZone,
-    cameraX: number,
-    cameraZ: number,
-  ): void {
-    // Rebuild meshes with new camera position for range filtering
-    this.rebuildMeshes(zone, cameraX, cameraZ);
-  }
-
-  // ── Utilities ───────────────────────────────────────────────
-
-  private groupByTier(cities: readonly CityData[]): Map<CityTier, CityData[]> {
-    const map = new Map<CityTier, CityData[]>();
-    for (const c of cities) {
-      const arr = map.get(c.tier);
-      if (arr) {
-        arr.push(c);
-      } else {
-        map.set(c.tier, [c]);
-      }
-    }
-    return map;
   }
 }

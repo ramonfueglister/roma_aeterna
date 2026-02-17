@@ -12,7 +12,7 @@ import type { ShaderNodeObject } from 'three/tsl';
 import {
   uniform, float, vec2, vec3, vec4,
   attribute,
-  sin, cos, mix, pow, max, abs, dot, normalize, reflect,
+  sin, mix, pow, max, abs, dot, normalize, reflect,
   smoothstep, fract, floor, clamp,
   texture,
   Fn,
@@ -27,12 +27,12 @@ import { WATER_LEVEL, MAP_SIZE } from '../config';
 // Constants
 // ---------------------------------------------------------------------------
 
-const WATER_Y = WATER_LEVEL - 1; // visual position just below logical water level
+const WATER_Y = WATER_LEVEL; // spec §5: water at height 32 (sea level)
 const PLANE_SIZE = MAP_SIZE * 1.5;
 const GRID_SEGMENTS = 256;
 
-/** Sun position matching main.ts directional light */
-const SUN_POSITION = new THREE.Vector3(-1500, 3000, -1200).normalize();
+/** Sun position matching main.ts directional light (spec §22: 35° elevation) */
+const SUN_POSITION = new THREE.Vector3(-1500, 1345, -1200).normalize();
 
 // ---------------------------------------------------------------------------
 // TSL Noise Functions
@@ -93,12 +93,13 @@ export class WaterRenderer {
     // ---- Alias uniforms for closure capture ----
 
     const uTime = this.uTime;
-    const uWaveAmplitude = uniform(2.0);
-    const uOctaves = uniform(3);
     const uCameraPos = this.uCameraPos;
     const uSunDir = uniform(SUN_POSITION.clone());
-    const uDeepColor = uniform(new THREE.Color(0x0e2a45));
-    const uShallowColor = uniform(new THREE.Color(0x2a7e8f));
+    // Spec §5: 4 depth zone colors
+    const uCoastColor = uniform(new THREE.Color(100 / 255, 200 / 255, 210 / 255));   // (100,200,210) turquoise
+    const uShallowColor = uniform(new THREE.Color(65 / 255, 155 / 255, 190 / 255));  // (65,155,190) light blue
+    const uMediumColor = uniform(new THREE.Color(40 / 255, 100 / 255, 160 / 255));   // (40,100,160) medium blue
+    const uDeepColor = uniform(new THREE.Color(20 / 255, 50 / 255, 110 / 255));      // (20,50,110) deep blue
     const uSpecularColor = uniform(new THREE.Color(0xfff0c8));
     const uOpacity = uniform(0.82);
     const uEnableFoam = uniform(1.0);
@@ -106,26 +107,22 @@ export class WaterRenderer {
     const uHasHeightMap = this.uHasHeightMap;
     const uMapSize = uniform(MAP_SIZE);
 
-    // ---- Wave displacement function ----
+    // ---- Wave displacement function (spec §5: 2 directional sine waves) ----
+    // Wave 1: freq 0.05, amp 0.3, direction 30°, speed 0.02
+    // Wave 2: freq 0.08, amp 0.15, direction 120°, speed 0.02
+    const wave1Dir = vec2(float(Math.cos(30 * Math.PI / 180)), float(Math.sin(30 * Math.PI / 180)));
+    const wave2Dir = vec2(float(Math.cos(120 * Math.PI / 180)), float(Math.sin(120 * Math.PI / 180)));
 
     const waveDisplacement = Fn(([pos, time]: [SNode, SNode]) => {
-      // Octave 1 -- large rolling swell
-      const h1 = sin(pos.x.mul(0.008).add(time.mul(0.35)))
-        .mul(cos(pos.y.mul(0.006).add(time.mul(0.28))))
-        .mul(1.0);
+      // Wave 1: amplitude 0.3, frequency 0.05, speed 0.02
+      const phase1 = dot(pos, wave1Dir).mul(0.05).add(time.mul(0.02));
+      const h1 = sin(phase1).mul(0.3);
 
-      // Octave 2 -- medium chop at an angle
-      const h2 = sin(dot(pos, vec2(0.012, 0.009)).add(time.mul(0.50))).mul(0.5);
+      // Wave 2: amplitude 0.15, frequency 0.08, speed 0.02
+      const phase2 = dot(pos, wave2Dir).mul(0.08).add(time.mul(0.02));
+      const h2 = sin(phase2).mul(0.15);
 
-      // Octave 3 -- fine ripples (full quality only)
-      const h3 = tslNoise(pos.mul(0.04).add(time.mul(0.6))).mul(0.35).sub(0.175);
-
-      // Use octave 3 only when uOctaves >= 3
-      const height = h1.add(h2).add(
-        select(greaterThanEqual(uOctaves, float(3)), h3, float(0.0))
-      );
-
-      return height.mul(uWaveAmplitude);
+      return h1.add(h2);
     });
 
     // ---- Vertex position node (wave displacement on Y axis) ----
@@ -184,21 +181,31 @@ export class WaterRenderer {
       );
 
       const coastProximity = smoothstep(28.0, 34.0, terrainH);
-      const depthFromTerrain = float(1.0).sub(smoothstep(8.0, 28.0, terrainH));
 
-      // -- Depth-based colour blend --
+      // -- Depth-based 4-zone colour blend (spec §5) --
+      // terrainH encodes distance from coast: higher = closer to land
+      // Zone boundaries: coast (28-34), shallow (20-28), medium (8-20), deep (<8)
+      const coastZone = smoothstep(28.0, 34.0, terrainH);      // near coast
+      const shallowZone = smoothstep(20.0, 28.0, terrainH);    // shallow water
+      const mediumZone = smoothstep(8.0, 20.0, terrainH);      // medium depth
+
+      // Blend through 4 zones: deep → medium → shallow → coast
+      const deepToMedium = mix(uDeepColor, uMediumColor, mediumZone);
+      const toShallow = mix(deepToMedium, uShallowColor, shallowZone);
+      const waterColorBase = mix(toShallow, uCoastColor, coastZone);
+
+      // Fallback for no heightmap: wave-height based blend
       const depthFactorBase = smoothstep(-1.5, 1.5, vWaveHeight);
-      const depthFactorTerrain = mix(depthFromTerrain, depthFactorBase, 0.2);
-      const depthFactor = select(
+      const noHmColor = mix(uShallowColor, uDeepColor, depthFactorBase);
+      const waterColorSelected = select(
         greaterThanEqual(uHasHeightMap, float(0.5)),
-        depthFactorTerrain,
-        depthFactorBase
+        waterColorBase,
+        noHmColor
       );
-      const waterColorBase = mix(uShallowColor, uDeepColor, depthFactor);
 
       // Subtle animated ripple tint variation
       const ripple = tslNoise(vWorldPos.xz.mul(0.015).add(uTime.mul(0.15)));
-      const waterColor = mix(waterColorBase, waterColorBase.mul(1.12), ripple.mul(0.3));
+      const waterColor = mix(waterColorSelected, waterColorSelected.mul(1.12), ripple.mul(0.3));
 
       // -- Diffuse (subtle, water is mostly specular/reflective) --
       const NdotL = max(dot(N, L), 0.0);
