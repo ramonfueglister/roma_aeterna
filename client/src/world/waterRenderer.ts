@@ -11,7 +11,7 @@ import { Node, MeshPhysicalNodeMaterial } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import {
   uniform, float, vec2, vec3, vec4,
-  attribute,
+  positionLocal,
   sin, cos, mix, pow, max, abs, dot, normalize, reflect,
   smoothstep, fract, floor, clamp,
   texture,
@@ -130,32 +130,24 @@ export class WaterRenderer {
 
     // ---- Vertex position node (wave displacement on Y axis) ----
 
-    const geomPos = attribute('position', 'vec3');
-    const posXZ = geomPos.xz;
+    const posXZ = positionLocal.xz;
+    const waveH = waveDisplacement(posXZ, uTime);
 
-    const positionFn = Fn(() => {
-      const wH = waveDisplacement(posXZ, uTime);
-      return geomPos.add(vec3(0.0, wH, 0.0));
-    });
-
-    const displacedPosition = positionFn();
+    // Displaced position: add wave height to Y
+    const displacedPosition = positionLocal.add(vec3(0.0, waveH, 0.0));
 
     // ---- Analytical normal via central difference ----
 
-    const normalFn = Fn(() => {
-      const eps = float(1.0);
-      const hL = waveDisplacement(posXZ.add(vec2(-1.0, 0.0)), uTime);
-      const hR = waveDisplacement(posXZ.add(vec2(1.0, 0.0)), uTime);
-      const hD = waveDisplacement(posXZ.add(vec2(0.0, -1.0)), uTime);
-      const hU = waveDisplacement(posXZ.add(vec2(0.0, 1.0)), uTime);
-      return normalize(vec3(hL.sub(hR), eps.mul(2.0), hD.sub(hU)));
-    });
+    const eps = float(1.0);
+    const hL = waveDisplacement(posXZ.add(vec2(-1.0, 0.0)), uTime);
+    const hR = waveDisplacement(posXZ.add(vec2(1.0, 0.0)), uTime);
+    const hD = waveDisplacement(posXZ.add(vec2(0.0, -1.0)), uTime);
+    const hU = waveDisplacement(posXZ.add(vec2(0.0, 1.0)), uTime);
 
-    const analyticNormal = normalFn();
+    const analyticNormal = normalize(vec3(hL.sub(hR), eps.mul(2.0), hD.sub(hU)));
 
     // ---- Varyings: pass data from vertex to fragment stage ----
 
-    const waveH = waveDisplacement(posXZ, uTime);
     const vWaveHeight = varying(waveH, 'vWaveHeight');
     const vWorldPos = varying(
       modelWorldMatrix.mul(vec4(displacedPosition, 1.0)).xyz,
