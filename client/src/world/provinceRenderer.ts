@@ -22,7 +22,6 @@ import {
   PROVINCE_COUNT,
   BARBARIAN_PROVINCE_ID,
 } from '../config';
-import type { QualityPreset } from '../types';
 
 // ---------------------------------------------------------------------------
 // Height thresholds for camera-dependent rendering
@@ -237,23 +236,6 @@ const FRAGMENT_SHADER = /* glsl */ `
 `;
 
 // ---------------------------------------------------------------------------
-// Quality settings
-// ---------------------------------------------------------------------------
-
-interface ProvinceQualitySettings {
-  readonly borderWidth: number;
-  readonly fillAlpha: number;
-  readonly enabled: boolean;
-}
-
-const QUALITY_SETTINGS: Record<QualityPreset, ProvinceQualitySettings> = {
-  high:    { borderWidth: 2.0, fillAlpha: 0.30, enabled: true },
-  medium:  { borderWidth: 1.5, fillAlpha: 0.25, enabled: true },
-  low:     { borderWidth: 1.0, fillAlpha: 0.20, enabled: true },
-  toaster: { borderWidth: 1.0, fillAlpha: 0.15, enabled: false },
-};
-
-// ---------------------------------------------------------------------------
 // ProvinceRenderer
 // ---------------------------------------------------------------------------
 
@@ -266,7 +248,6 @@ export class ProvinceRenderer {
   private readonly geometry: THREE.PlaneGeometry;
   private readonly mesh: THREE.Mesh;
 
-  private quality: QualityPreset = 'high';
   private needsTextureUpload = false;
   private userVisible = true;
 
@@ -316,7 +297,6 @@ export class ProvinceRenderer {
     this.colorTexture.needsUpdate = true;
 
     // ── ShaderMaterial ──────────────────────────────────────────
-    const settings = QUALITY_SETTINGS[this.quality];
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
@@ -327,8 +307,8 @@ export class ProvinceRenderer {
         uProvinceMap:    { value: this.provinceTexture },
         uProvinceColors: { value: this.colorTexture },
         uCameraHeight:   { value: 0.0 },
-        uBorderWidth:    { value: settings.borderWidth },
-        uFillAlpha:      { value: settings.fillAlpha },
+        uBorderWidth:    { value: 2.0 },
+        uFillAlpha:      { value: 0.30 },
       },
     });
 
@@ -394,27 +374,6 @@ export class ProvinceRenderer {
 
     // Hide mesh entirely when below lowest threshold (performance) or user-toggled off
     this.mesh.visible = this.userVisible && cameraHeight >= TACTICAL_HEIGHT - BLEND_RANGE;
-  }
-
-  /**
-   * Adjust rendering quality preset. May disable the overlay entirely
-   * on the lowest quality tier.
-   */
-  setQuality(preset: QualityPreset): void {
-    this.quality = preset;
-    const settings = QUALITY_SETTINGS[preset];
-
-    const uBorderWidth = this.material.uniforms['uBorderWidth'];
-    if (uBorderWidth) {
-      uBorderWidth.value = settings.borderWidth;
-    }
-
-    const uFillAlpha = this.material.uniforms['uFillAlpha'];
-    if (uFillAlpha) {
-      uFillAlpha.value = settings.fillAlpha;
-    }
-
-    this.mesh.visible = settings.enabled;
   }
 
   /**

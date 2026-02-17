@@ -7,7 +7,7 @@
  *
  * Tree positions are accumulated from chunk data as chunks load (same
  * accumulation pattern as ProvinceRenderer). Camera-distance culling and
- * quality-preset instance caps keep the GPU budget tight.
+ * instance caps keep the GPU budget tight.
  *
  * Two InstancedMesh draw calls total: one for trunk boxes, one for canopy
  * boxes -- but we merge trunk+canopy into a single geometry per variant
@@ -399,15 +399,6 @@ export class TreeRenderer {
     this.dirty = false;
 
     this.rebuildInstances(cameraX, cameraZ, visRadius);
-  }
-
-  /**
-   * Change the maximum visible tree instance count.
-   * Forces a rebuild on the next update.
-   */
-  setMaxInstances(count: number): void {
-    this.maxInstances = count;
-    this.dirty = true;
   }
 
   /**

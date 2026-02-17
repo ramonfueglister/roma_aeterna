@@ -1,9 +1,9 @@
 /**
  * Worker pool manager for parallel terrain mesh generation.
  *
- * Maintains a fixed pool of Web Workers (default 4, configurable for
- * quality presets) and dispatches mesh-generation tasks using
- * least-loaded scheduling with an overflow task queue.
+ * Maintains a fixed pool of Web Workers (default 4) and dispatches
+ * mesh-generation tasks using least-loaded scheduling with an
+ * overflow task queue.
  *
  * Each request gets a unique ID; responses are matched back to the
  * originating Promise via a pending-request map.
@@ -54,15 +54,13 @@ interface WorkerEntry {
 // ── WorkerPool ───────────────────────────────────────────────────
 
 export class WorkerPool {
-  private workers: WorkerEntry[] = [];
+  private readonly workers: WorkerEntry[] = [];
   private readonly pending = new Map<number, PendingTask>();
   private readonly queue: QueuedTask[] = [];
   private nextId = 1;
   private disposed = false;
-  private targetPoolSize: number;
 
   constructor(poolSize: number = WORKER_COUNT) {
-    this.targetPoolSize = poolSize;
     for (let i = 0; i < poolSize; i++) {
       this.workers.push(this.createWorkerEntry());
     }
@@ -114,33 +112,6 @@ export class WorkerPool {
 
       this.dispatch(leastBusy, chunk, lod, resolve, reject);
     });
-  }
-
-  /**
-   * Resize the worker pool. Workers are added or removed as needed.
-   * Useful for quality preset changes (e.g. toaster profile uses 2).
-   *
-   * Excess workers are terminated only once they become idle (no
-   * pending tasks), so in-flight work is not lost.
-   */
-  setPoolSize(size: number): void {
-    if (this.disposed) return;
-    if (size < 1) {
-      log.warn(`setPoolSize(${size}) clamped to 1`);
-      size = 1;
-    }
-
-    this.targetPoolSize = size;
-
-    // Add workers if we need more
-    while (this.workers.length < size) {
-      this.workers.push(this.createWorkerEntry());
-    }
-
-    // Remove idle excess workers
-    this.trimExcessWorkers();
-
-    log.info(`Pool resized to target=${size}, active=${this.workers.length}`);
   }
 
   /** Terminate all workers and reject any pending / queued tasks. */
@@ -282,8 +253,6 @@ export class WorkerPool {
       );
     }
 
-    // After resolving, try to trim if we have excess workers
-    this.trimExcessWorkers();
     this.drainQueue();
   }
 
@@ -303,15 +272,10 @@ export class WorkerPool {
     const idx = this.workers.indexOf(entry);
     if (idx === -1) return;
 
-    // Replace with a fresh worker if we still need this many
-    if (this.workers.length <= this.targetPoolSize) {
-      const replacement = this.createWorkerEntry();
-      this.workers[idx] = replacement;
-      log.info('Replaced crashed worker with fresh instance');
-    } else {
-      // We have excess workers; just remove the dead one
-      this.workers.splice(idx, 1);
-    }
+    // Replace with a fresh worker
+    const replacement = this.createWorkerEntry();
+    this.workers[idx] = replacement;
+    log.info('Replaced crashed worker with fresh instance');
 
     // In-flight tasks for this worker will be rejected by their timeouts.
     // Drain the queue with available workers.
@@ -334,29 +298,4 @@ export class WorkerPool {
     }
   }
 
-  /**
-   * Remove idle excess workers when pool has been downsized.
-   * Only terminates workers with pendingCount === 0 to avoid
-   * losing in-flight work.
-   */
-  private trimExcessWorkers(): void {
-    while (this.workers.length > this.targetPoolSize) {
-      // Find an idle worker to remove (search from the end)
-      let removed = false;
-      for (let i = this.workers.length - 1; i >= 0; i--) {
-        const w = this.workers[i]!;
-        if (w.pendingCount === 0) {
-          w.worker.terminate();
-          this.workers.splice(i, 1);
-          removed = true;
-          break;
-        }
-      }
-      if (!removed) {
-        // All excess workers are busy; they will be trimmed
-        // when they finish their current task.
-        break;
-      }
-    }
-  }
 }

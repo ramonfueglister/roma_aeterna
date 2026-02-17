@@ -1,11 +1,7 @@
 /**
  * Animated Mediterranean water rendering system.
  *
- * Three quality tiers:
- *   'full'   - Custom ShaderMaterial, 256x256 grid, 3 wave octaves, foam, fresnel
- *   'normal' - Custom ShaderMaterial, 128x128 grid, 2 wave octaves, no foam
- *   'flat'   - Static MeshStandardMaterial plane (no custom shader)
- *
+ * Custom ShaderMaterial with 256x256 grid, 3 wave octaves, foam, and fresnel.
  * Uses GLSL ShaderMaterial on WebGL2. Single draw call for the entire water surface.
  */
 
@@ -13,27 +9,12 @@ import * as THREE from 'three';
 import { WATER_LEVEL, MAP_SIZE } from '../config';
 
 // ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export type WaterQuality = 'full' | 'normal' | 'flat';
-
-export interface WaterRendererOptions {
-  quality?: WaterQuality;
-}
-
-// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const WATER_Y = WATER_LEVEL - 1; // visual position just below logical water level
 const PLANE_SIZE = MAP_SIZE * 1.5;
-
-const GRID_SIZES: Record<WaterQuality, number> = {
-  full: 256,
-  normal: 128,
-  flat: 1, // PlaneGeometry with 1 segment per axis
-};
+const GRID_SEGMENTS = 256;
 
 /** Sun position matching main.ts directional light */
 const SUN_POSITION = new THREE.Vector3(-1500, 3000, -1200).normalize();
@@ -220,91 +201,16 @@ const FRAGMENT_SHADER = /* glsl */ `
 // ---------------------------------------------------------------------------
 
 export class WaterRenderer {
-  private scene: THREE.Scene;
-  private quality: WaterQuality;
-  private mesh: THREE.Mesh | null = null;
-  private material: THREE.ShaderMaterial | THREE.MeshStandardMaterial | null = null;
-  private geometry: THREE.PlaneGeometry | null = null;
+  private readonly scene: THREE.Scene;
+  private readonly mesh: THREE.Mesh;
+  private readonly material: THREE.ShaderMaterial;
+  private readonly geometry: THREE.PlaneGeometry;
 
-  constructor(scene: THREE.Scene, options?: WaterRendererOptions) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
-    this.quality = options?.quality ?? 'full';
-    this.build();
-  }
 
-  // ── Public API ──────────────────────────────────────────────────
-
-  /**
-   * Call once per frame. Updates time and camera-dependent uniforms.
-   * For 'flat' quality this is a no-op.
-   */
-  update(time: number, cameraPosition: THREE.Vector3): void {
-    if (this.quality === 'flat' || !this.material) return;
-
-    const mat = this.material as THREE.ShaderMaterial;
-    if (!mat.uniforms) return;
-
-    const uTime = mat.uniforms['uTime'];
-    const uCameraPos = mat.uniforms['uCameraPos'];
-    if (uTime) uTime.value = time;
-    if (uCameraPos) (uCameraPos.value as THREE.Vector3).copy(cameraPosition);
-  }
-
-  /**
-   * Switch quality level at runtime. Disposes old resources and rebuilds.
-   */
-  setQuality(quality: WaterQuality): void {
-    if (quality === this.quality) return;
-    this.quality = quality;
-    this.destroyMesh();
-    this.build();
-  }
-
-  /**
-   * Dispose all GPU resources. Call when the water system is no longer needed.
-   */
-  dispose(): void {
-    this.destroyMesh();
-  }
-
-  // ── Internal ────────────────────────────────────────────────────
-
-  private build(): void {
-    if (this.quality === 'flat') {
-      this.buildFlat();
-    } else {
-      this.buildShader();
-    }
-  }
-
-  /** Build the simple static water plane (flat quality). */
-  private buildFlat(): void {
-    this.geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, 1, 1);
+    this.geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, GRID_SEGMENTS, GRID_SEGMENTS);
     this.geometry.rotateX(-Math.PI / 2);
-
-    this.material = new THREE.MeshStandardMaterial({
-      color: 0x1a3a5c,
-      transparent: true,
-      opacity: 0.85,
-      roughness: 0.3,
-      metalness: 0.1,
-      side: THREE.FrontSide,
-    });
-
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
-    this.mesh.position.y = WATER_Y;
-    this.mesh.renderOrder = 1;
-    this.scene.add(this.mesh);
-  }
-
-  /** Build the animated shader water (full or normal quality). */
-  private buildShader(): void {
-    const segments = GRID_SIZES[this.quality];
-    this.geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, segments, segments);
-    this.geometry.rotateX(-Math.PI / 2);
-
-    const isFull = this.quality === 'full';
-    const octaves = isFull ? 3 : 2;
 
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERTEX_SHADER,
@@ -315,7 +221,7 @@ export class WaterRenderer {
       uniforms: {
         uTime:          { value: 0.0 },
         uWaveAmplitude: { value: 2.0 },
-        uOctaves:       { value: octaves },
+        uOctaves:       { value: 3 },
         uCameraPos:     { value: new THREE.Vector3() },
         uSunDir:        { value: SUN_POSITION.clone() },
         // Mediterranean palette
@@ -323,7 +229,7 @@ export class WaterRenderer {
         uShallowColor:  { value: new THREE.Color(0x2a7e8f) },   // warm teal
         uSpecularColor: { value: new THREE.Color(0xfff0c8) },   // golden highlight
         uOpacity:       { value: 0.82 },
-        uEnableFoam:    { value: isFull },
+        uEnableFoam:    { value: true },
       },
     });
 
@@ -334,19 +240,24 @@ export class WaterRenderer {
     this.scene.add(this.mesh);
   }
 
-  /** Remove the current mesh from the scene and release GPU resources. */
-  private destroyMesh(): void {
-    if (this.mesh) {
-      this.scene.remove(this.mesh);
-      this.mesh = null;
-    }
-    if (this.geometry) {
-      this.geometry.dispose();
-      this.geometry = null;
-    }
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
-    }
+  // ── Public API ──────────────────────────────────────────────────
+
+  /**
+   * Call once per frame. Updates time and camera-dependent uniforms.
+   */
+  update(time: number, cameraPosition: THREE.Vector3): void {
+    const uTime = this.material.uniforms['uTime'];
+    const uCameraPos = this.material.uniforms['uCameraPos'];
+    if (uTime) uTime.value = time;
+    if (uCameraPos) (uCameraPos.value as THREE.Vector3).copy(cameraPosition);
+  }
+
+  /**
+   * Dispose all GPU resources. Call when the water system is no longer needed.
+   */
+  dispose(): void {
+    this.scene.remove(this.mesh);
+    this.geometry.dispose();
+    this.material.dispose();
   }
 }

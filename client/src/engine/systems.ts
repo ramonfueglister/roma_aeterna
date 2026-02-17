@@ -20,6 +20,8 @@ import { ProvinceRenderer } from '../world/provinceRenderer';
 import { CityRenderer } from '../world/cityDatabase';
 import { TreeRenderer } from '../world/treeRenderer';
 import { PostProcessingPipeline } from '../rendering/postProcessing';
+import { TextLabelRenderer } from '../world/textLabels';
+import { CITY_DATABASE } from '../world/cityDatabase';
 
 // ── Base ──────────────────────────────────────────────────────────
 
@@ -176,6 +178,27 @@ export class TreeSystem extends BaseSystem {
   update(): void {
     const cam = this.engine.camera.position;
     this.renderer.update(cam.x, cam.y, cam.z);
+  }
+
+  dispose(): void {
+    this.renderer.dispose();
+  }
+}
+
+// ── Text Labels ──────────────────────────────────────────────────
+
+export class TextLabelSystem extends BaseSystem {
+  readonly name = 'textLabels';
+  renderer!: TextLabelRenderer;
+
+  protected onInit(engine: Engine): void {
+    this.renderer = new TextLabelRenderer(engine.scene);
+    this.renderer.setCities([...CITY_DATABASE]);
+  }
+
+  update(): void {
+    const cam = this.engine.camera.position;
+    this.renderer.update(cam.y, cam.x, cam.z);
   }
 
   dispose(): void {

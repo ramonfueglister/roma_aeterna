@@ -3,11 +3,7 @@
  *
  * Chain: RenderPass -> UnrealBloomPass -> TiltShiftPass -> ColorGradingPass -> ParchmentOverlayPass -> VignettePass
  *
- * Quality presets control which passes are active:
- *   high    - all effects (parchment overlay activates above camera height 2000)
- *   medium  - bloom + parchment overlay + color grading + vignette
- *   low     - vignette only (no parchment)
- *   toaster - bypass composer entirely (direct renderer.render)
+ * All passes are always active. Parchment overlay fades in above camera height 2000.
  */
 
 import * as THREE from 'three';
@@ -16,7 +12,6 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
-import type { QualityPreset } from '../types';
 import { createLogger } from '../core/logger';
 
 const log = createLogger('postfx');
@@ -367,10 +362,6 @@ interface ParchmentOverlayUniforms {
 // ── Pipeline ─────────────────────────────────────────────────────
 
 export class PostProcessingPipeline {
-  private readonly renderer: THREE.WebGLRenderer;
-  private readonly scene: THREE.Scene;
-  private readonly camera: THREE.PerspectiveCamera;
-
   private readonly composer: EffectComposer;
   private readonly renderPass: RenderPass;
   private readonly bloomPass: UnrealBloomPass;
@@ -379,18 +370,11 @@ export class PostProcessingPipeline {
   private readonly tiltShiftPass: ShaderPass;
   private readonly parchmentOverlayPass: ShaderPass;
 
-  private quality: QualityPreset = 'high';
-  private bypassed = false;
-
   constructor(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
     camera: THREE.PerspectiveCamera,
   ) {
-    this.renderer = renderer;
-    this.scene = scene;
-    this.camera = camera;
-
     // --- Composer ---
     this.composer = new EffectComposer(renderer);
 
@@ -426,9 +410,6 @@ export class PostProcessingPipeline {
     this.vignettePass = new ShaderPass(VignetteShader);
     this.composer.addPass(this.vignettePass);
 
-    // Apply default quality
-    this.setQuality('high');
-
     log.info('Post-processing pipeline initialized');
   }
 
@@ -454,13 +435,8 @@ export class PostProcessingPipeline {
 
   /**
    * Render a frame through the post-processing pipeline.
-   * In toaster mode, bypasses the composer and renders directly.
    */
   render(): void {
-    if (this.bypassed) {
-      this.renderer.render(this.scene, this.camera);
-      return;
-    }
     this.composer.render();
   }
 
@@ -481,59 +457,6 @@ export class PostProcessingPipeline {
     this.parchmentOverlayUniforms.uResolution.value.set(width, height);
   }
 
-  /**
-   * Configure which post-processing passes are active based on the
-   * quality preset. This enables or disables passes by setting their
-   * `enabled` flag, which is essentially free when disabled.
-   *
-   *   high    - bloom + tilt-shift + color grading + parchment overlay + vignette
-   *   medium  - bloom + color grading + parchment overlay + vignette
-   *   low     - vignette only (no parchment)
-   *   toaster - bypass composer entirely
-   */
-  setQuality(preset: QualityPreset): void {
-    this.quality = preset;
-
-    switch (preset) {
-      case 'high':
-        this.bypassed = false;
-        this.bloomPass.enabled = true;
-        this.tiltShiftPass.enabled = true;
-        this.colorGradingPass.enabled = true;
-        this.parchmentOverlayPass.enabled = true;
-        this.vignettePass.enabled = true;
-        break;
-
-      case 'medium':
-        this.bypassed = false;
-        this.bloomPass.enabled = true;
-        this.tiltShiftPass.enabled = false;
-        this.colorGradingPass.enabled = true;
-        this.parchmentOverlayPass.enabled = true;
-        this.vignettePass.enabled = true;
-        break;
-
-      case 'low':
-        this.bypassed = false;
-        this.bloomPass.enabled = false;
-        this.tiltShiftPass.enabled = false;
-        this.colorGradingPass.enabled = false;
-        this.parchmentOverlayPass.enabled = false;
-        this.vignettePass.enabled = true;
-        break;
-
-      case 'toaster':
-        this.bypassed = true;
-        this.bloomPass.enabled = false;
-        this.tiltShiftPass.enabled = false;
-        this.colorGradingPass.enabled = false;
-        this.parchmentOverlayPass.enabled = false;
-        this.vignettePass.enabled = false;
-        break;
-    }
-
-    log.info(`Quality set to "${preset}" (bypassed=${String(this.bypassed)})`);
-  }
 
   /**
    * Release all GPU resources held by the pipeline.
@@ -556,16 +479,6 @@ export class PostProcessingPipeline {
   }
 
   // ── Accessors for runtime tuning ─────────────────────────────
-
-  /** Current quality preset */
-  get currentQuality(): QualityPreset {
-    return this.quality;
-  }
-
-  /** Whether the composer is fully bypassed (toaster mode) */
-  get isBypassed(): boolean {
-    return this.bypassed;
-  }
 
   // --- Bloom ---
 

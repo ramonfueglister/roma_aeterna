@@ -16,6 +16,7 @@ import {
   ProvinceSystem,
   CitySystem,
   TreeSystem,
+  TextLabelSystem,
   PostProcessingSystem,
   HudSystem,
   InteractionSystem,
@@ -33,14 +34,16 @@ const engine = new Engine(app);
 // 1. Camera first (other systems read camera position)
 // 2. Terrain (loads chunks based on camera)
 // 3. World renderers (provinces, cities, trees, water)
-// 4. Post-processing (renders the final frame)
-// 5. HUD + interaction (UI overlay, input handling)
+// 4. Text labels (SDF labels for cities and provinces)
+// 5. Post-processing (renders the final frame)
+// 6. HUD + interaction (UI overlay, input handling)
 engine.register(new CameraSystem());
 engine.register(new TerrainSystem());
 engine.register(new WaterSystem());
 engine.register(new ProvinceSystem());
 engine.register(new CitySystem());
 engine.register(new TreeSystem());
+engine.register(new TextLabelSystem());
 engine.register(new PostProcessingSystem());
 engine.register(new HudSystem());
 engine.register(new InteractionSystem());

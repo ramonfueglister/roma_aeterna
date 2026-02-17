@@ -190,10 +190,6 @@ export interface ProvinceData {
   color: number; // RGB hex
 }
 
-// ── Quality ─────────────────────────────────────────────────────
-
-export type QualityPreset = 'high' | 'medium' | 'low' | 'toaster';
-
 // ── Events ──────────────────────────────────────────────────────
 
 export type GameEventType =
