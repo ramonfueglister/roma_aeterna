@@ -31,6 +31,7 @@ import {
   world,
   createCameraEntity,
   createCityEntity,
+  createProvinceEntity,
   setCameraRef,
   setChunkLoaderRef,
   setCityRendererRef,
@@ -40,10 +41,11 @@ import {
   setProvinceRendererRef,
   Position,
   CityInfo,
+  ProvinceTag,
   Culture,
 } from './ecs';
 import { CITY_DATABASE } from './world/cityDatabase';
-import { MAP_SIZE } from './config';
+import { MAP_SIZE, PROVINCE_COUNT } from './config';
 import type { CultureType } from './types';
 
 // ── Culture string → ECS enum mapping ────────────────────────────
@@ -59,6 +61,14 @@ const CULTURE_MAP: Record<CultureType, number> = {
   levantine: Culture.EASTERN,
   dacian: Culture.CELTIC,
 };
+
+/** Create ECS province entities (1 per province, IDs 1-41). */
+function hydrateProvinceEntities(): void {
+  for (let i = 1; i <= PROVINCE_COUNT; i++) {
+    const eid = createProvinceEntity(world);
+    ProvinceTag.number[eid] = i;
+  }
+}
 
 /** Hydrate ECS city entities from the static city database. */
 function hydrateCityEntities(): void {
@@ -121,8 +131,9 @@ async function init(): Promise<void> {
   createCameraEntity(world);
   setCameraRef(engine.camera);
 
-  // Hydrate city entities from static database
+  // Hydrate game entities from static data
   hydrateCityEntities();
+  hydrateProvinceEntities();
 
   // Wire renderer refs so ECS systems can delegate to existing renderers
   const terrainSys = engine.getSystem<TerrainSystem>('terrain');
