@@ -307,6 +307,25 @@ Workers receive raw TypedArrays extracted from ECS component stores (see `docs/E
 
 **Total target**: ~192 MB
 
+### Texture Memory Budget
+
+Texture VRAM is the primary bottleneck on integrated GPUs (Intel UHD 630). All texture atlases
+and GPU-resident textures must stay within the following combined limits:
+
+| Texture | Balanced | Toaster | Notes |
+|---------|----------|---------|-------|
+| Troika SDF glyph atlas | 8 MB | 4 MB | Single Cinzel font, runtime-generated |
+| Parchment overlay | 1 MB | 1 MB | 512x512 seamless noise texture |
+| Province JFA distance field | 16 MB | 8 MB | 2048x2048 RGBA (Balanced), 1024x1024 (Toaster) |
+| City voxel model textures | 0 MB | 0 MB | Vertex colors only, no textures |
+| Water normal maps | 4 MB | 0 MB | Two 512x512 normal maps (disabled on Toaster: flat water) |
+| Cloud/shadow mask | 2 MB | 1 MB | 256x256 tiling cloud texture |
+| Render targets (bloom, DOF) | 32 MB | 16 MB | Half-res intermediate buffers |
+| **Total texture VRAM** | **~63 MB** | **~30 MB** | Hard cap: 64 MB (Balanced), 32 MB (Toaster) |
+
+On Intel UHD 630 (shared VRAM), exceeding the Toaster texture budget causes immediate
+frame rate collapse. The Toaster profile must enforce the 32 MB cap.
+
 ---
 
 ## 9. Frame Budgets
@@ -631,7 +650,7 @@ Detail view must satisfy the following Caesar-style liveliness constraints:
 | Data Pipeline  | Python                  | 3.11+            |
 | Chunk Gen      | Python + numpy          | (part of data pipeline) |
 | Mesh Cache     | idb-keyval              | latest           |
-| ECS            | bitECS                  | v0.4.x           |
+| ECS            | bitECS                  | v0.4.0 (pinned)  |
 | Renderer       | WebGPU                  | --              |
 
 ### Python Dependencies
@@ -1195,6 +1214,7 @@ Coverage requirement: all movable classes (`citizen` variants, traders, caravans
 1. **Global route planning (inter-city)**:
   - Hierarchical nav graph with trunk/regional/local edge classes.
   - Query algorithm: ALT+A* with precomputed landmarks on top of contracted hierarchy data.
+  - **Landmark selection strategy**: 8 landmarks selected as major trade hubs at geographic extremes for optimal heuristic spread: Roma (center), Alexandria (SE), Londinium (NW), Byzantium (NE), Gades (SW), Antiochia (E), Carthago (S), Augusta Treverorum (N). This strategic placement at the empire's periphery and center maximizes ALT heuristic effectiveness across all possible origin-destination pairs.
   - Seasonal/route-state weights supported (`travel_time_by_season`, disruption flags).
 2. **Corridor planning (intra-city / district)**:
   - Walkable corridor extraction on district graph (`STREET`, `PLAZA`, `GATE`, `HARBOR_WALK`).

@@ -138,6 +138,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uCameraHeight;
   uniform float uBorderWidth;
   uniform float uFillAlpha;
+  uniform float uTime;
 
   varying vec2 vUv;
   varying vec3 vWorldPos;
@@ -207,7 +208,8 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     // ── Compose final colour ────────────────────────────────────
     vec3 fillColor   = provColor.rgb;
-    vec3 borderColor = provColor.rgb * 0.4; // darker border variant
+    // Bright border for bloom pickup (1.3x province color)
+    vec3 borderColor = provColor.rgb * 1.3;
 
     float alpha = 0.0;
     vec3 color  = vec3(0.0);
@@ -217,7 +219,9 @@ const FRAGMENT_SHADER = /* glsl */ `
       color = borderColor;
       // Thicker appearance at higher altitudes, thin at tactical
       float borderAlpha = mix(0.5, 0.85, fillFactor);
-      alpha = borderAlpha * borderFactor;
+      // Subtle pulse animation on border brightness
+      float pulse = 0.9 + 0.1 * sin(uTime * 1.2);
+      alpha = borderAlpha * borderFactor * pulse;
     } else {
       // Fill only at strategic height
       color = fillColor;
@@ -309,6 +313,7 @@ export class ProvinceRenderer {
         uCameraHeight:   { value: 0.0 },
         uBorderWidth:    { value: 2.0 },
         uFillAlpha:      { value: 0.30 },
+        uTime:           { value: 0.0 },
       },
     });
 
@@ -359,7 +364,7 @@ export class ProvinceRenderer {
   /**
    * Per-frame update. Sets camera-height uniform and uploads dirty texture.
    */
-  update(cameraHeight: number): void {
+  update(cameraHeight: number, elapsed = 0): void {
     // Upload texture if chunk data changed since last frame
     if (this.needsTextureUpload) {
       this.provinceTexture.needsUpdate = true;
@@ -370,6 +375,12 @@ export class ProvinceRenderer {
     const uCameraHeight = this.material.uniforms['uCameraHeight'];
     if (uCameraHeight) {
       uCameraHeight.value = cameraHeight;
+    }
+
+    // Update time uniform for border pulse animation
+    const uTime = this.material.uniforms['uTime'];
+    if (uTime) {
+      uTime.value = elapsed;
     }
 
     // Hide mesh entirely when below lowest threshold (performance) or user-toggled off

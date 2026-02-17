@@ -13,7 +13,7 @@ NOT a smooth terrain game - everything is blocky voxels. The world runs 24/7 wit
 - **Backend**: Supabase (PostgreSQL + PostGIS + Realtime + Rust Simulation Service + Storage + Auth)
 - **Data Pipeline**: Python (GDAL, numpy, GeoPandas, rasterio) -- including binary chunk generation
 - **Mesh Caching**: idb-keyval (IndexedDB)
-- **ECS**: bitECS v0.4.x (SoA entity component system, client-side cache)
+- **ECS**: bitECS v0.4.0 (SoA entity component system, client-side cache, pinned version)
 - **AI Agents**: Rust simulation worker (rule-based + optional LLM only outside tick loop)
 
 ## Architecture
@@ -155,7 +155,7 @@ make clean            # Remove build artifacts
 - IndexedDB caching for generated meshes
 - Spiral chunk loading from camera center outward
 - LOD transitions with alpha blending (200-500 unit zones)
-- ALL game data in Supabase PostgreSQL - no local file serving
+- ALL game data in Supabase PostgreSQL - no local file serving (Supabase is authoritative; IndexedDB is a throughput cache; procedural chunk generation during development is a convenience, not a source of truth — procedural data is replaced when Supabase chunk data is available)
 - Realtime subscriptions for world events + player updates; agent positions via viewport polling
 - Historical accuracy: 117 AD Roman Empire under Trajan
 - Province-ID 0 = outside empire (barbarian territory), IDs 1-41 = provinces

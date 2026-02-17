@@ -101,6 +101,27 @@ The `ResourceStateSystem` advances `stateTimer` each frame and transitions betwe
 
 Harvest visualization remains active in all quality profiles; only density is scaled.
 
+### Resource Density and Pool Sizing Limits
+
+Resource site placement must follow density rules to prevent InstancedMesh pool overflow
+and maintain visual clarity.
+
+| Constraint | Value | Notes |
+|-----------|-------|-------|
+| Max resource sites per chunk (32x32) | 4 | Prevents cluster overload in fertile regions |
+| Max resource sites per province | 30 | Ensures balanced distribution |
+| Total resource sites (world) | ~800-1,200 | Across all 41 provinces |
+| Max visible simultaneously (frustum) | 200 (High), 120 (Med), 80 (Low), 40 (Toaster) | Drives InstancedMesh pool max |
+| InstancedMesh pool size (resource icons) | 200 | Shared across all 24 resource types |
+| InstancedMesh pool size (harvest workers) | 100 (High), 60 (Med), 40 (Low), 20 (Toaster) | Animated worker sprites |
+| Min distance between sites | 3 tiles | Prevents visual overlap |
+
+**Pool sizing rationale**: The resource icon InstancedMesh pool is pre-allocated at 200
+instances (the High profile visible cap). Worker InstancedMesh pools are profile-scaled.
+When the visible cap is reached, additional sites beyond the frustum boundary are culled
+by the `VisibilitySystem` — their `Visible.value` is set to 0 and their InstanceRef slot
+is released back to the pool.
+
 ### End-to-End Production Chain Visualization (Mandatory)
 
 Resource ambience must show the full civic economy loop, not isolated site animations.

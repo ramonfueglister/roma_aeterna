@@ -1,7 +1,11 @@
-# Entity Component System (bitECS v0.4.x)
+# Entity Component System (bitECS v0.4.0)
 
 Client-side ECS architecture for the Roman Empire Voxel World.
 bitECS provides the data layer between Supabase (authoritative server) and Three.js (view).
+
+**Pinned version:** `bitecs@0.4.0` (exact). v0.4.0 introduced a new component API using plain
+objects with TypedArray stores instead of the v0.3.x `defineComponent({ field: Types.f32 })` syntax.
+All examples in this document use the v0.4.0 API.
 
 ---
 
@@ -9,14 +13,14 @@ bitECS provides the data layer between Supabase (authoritative server) and Three
 
 ### Why bitECS
 
-| Criterion | bitECS v0.4.x | becsy | miniplex | tick-knock |
+| Criterion | bitECS v0.4.0 | becsy | miniplex | tick-knock |
 |-----------|---------------|-------|----------|------------|
 | Storage model | SoA TypedArrays | SoA + AoS hybrid | AoS (Map-based) | AoS (class-based) |
 | Iteration speed | ~335K ops/s | ~280K ops/s | ~120K ops/s | ~90K ops/s |
 | Bundle size | ~5 KB | ~25 KB | ~8 KB | ~12 KB |
 | TypeScript native | Yes (100%) | Yes | Yes | Yes |
 | Worker transfer | Zero-copy (TypedArrays) | Requires serialization | Requires serialization | Requires serialization |
-| Entity relations | Yes (v0.4.x) | Yes | No | No |
+| Entity relations | Yes (v0.4.0) | Yes | No | No |
 | Framework endorsement | Phaser 4 | None major | None major | None major |
 
 **Key reasons:**
@@ -24,13 +28,13 @@ bitECS provides the data layer between Supabase (authoritative server) and Three
 1. **SoA TypedArrays** — Component data stored as `Float32Array`/`Uint8Array`. Cache-friendly iteration, maps directly to `InstancedMesh.instanceMatrix` and worker `Transferable` buffers.
 2. **~5 KB, zero deps** — Minimal footprint in a project already budget-constrained (512 MB GPU, 256 MB heap).
 3. **Worker-friendly** — The project uses 4 Web Workers with `Transferable ArrayBuffers`. bitECS component stores are already TypedArrays — extract a slice, transfer it, zero-copy.
-4. **Functional API** — No classes. `defineComponent()`, `defineQuery()`, `defineSystem()` are pure functions. Matches the project's existing functional patterns.
-5. **Entity relations (v0.4.x)** — Parent-child (city → buildings), targeting (agent → destination city). Eliminates manual ID lookups.
+4. **Functional API** — No classes. Components are plain objects with TypedArray stores. `query()`, `addEntity()`, `addComponent()` are pure functions. Matches the project's existing functional patterns.
+5. **Entity relations (v0.4.0)** — Parent-child (city → buildings), targeting (agent → destination city). Eliminates manual ID lookups.
 
 ### npm
 
 ```bash
-npm install bitecs@^0.4
+npm install bitecs@0.4.0
 ```
 
 ---
@@ -41,11 +45,11 @@ A single ECS world is created at client startup. It holds all component stores a
 
 ```typescript
 // client/src/ecs/world.ts
-import { createWorld, IWorld } from 'bitecs'
+import { createWorld } from 'bitecs'
 
-export const world: IWorld = createWorld({
-  maxEntities: 20_000  // chunks + cities + agents + trees + provinces + resources + misc
-})
+const MAX_ENTITIES = 20_000  // chunks + cities + agents + trees + provinces + resources + misc
+
+export const world = createWorld(MAX_ENTITIES)
 ```
 
 **Sizing rationale:**
@@ -74,44 +78,47 @@ All components are SoA (Struct of Arrays). Each field is a separate TypedArray i
 
 ```typescript
 // client/src/ecs/components.ts
-import { defineComponent, Types } from 'bitecs'
+// bitECS v0.4.0 API: components are plain objects with TypedArray stores.
+// Pre-allocate arrays sized to MAX_ENTITIES (20,000).
+
+const N = 20_000
 
 // World-space position (tile coordinates for game objects, world units for camera)
-export const Position = defineComponent({
-  x: Types.f32,
-  y: Types.f32,
-  z: Types.f32
-})
+export const Position = {
+  x: new Float32Array(N),
+  y: new Float32Array(N),
+  z: new Float32Array(N)
+}
 
 // Movement velocity (tiles/second for agents, units/second for camera)
-export const Velocity = defineComponent({
-  x: Types.f32,
-  y: Types.f32,
-  z: Types.f32
-})
+export const Velocity = {
+  x: new Float32Array(N),
+  y: new Float32Array(N),
+  z: new Float32Array(N)
+}
 
 // Rotation (radians)
-export const Rotation = defineComponent({
-  yaw: Types.f32,
-  pitch: Types.f32
-})
+export const Rotation = {
+  yaw: new Float32Array(N),
+  pitch: new Float32Array(N)
+}
 ```
 
 ### Chunk Components
 
 ```typescript
 // Grid coordinates (0-63) for chunks
-export const ChunkCoord = defineComponent({
-  cx: Types.ui8,
-  cy: Types.ui8
-})
+export const ChunkCoord = {
+  cx: new Uint8Array(N),
+  cy: new Uint8Array(N)
+}
 
 // Current LOD level (0-3) and target LOD for transitions
-export const LODLevel = defineComponent({
-  current: Types.ui8,
-  target: Types.ui8,
-  blendAlpha: Types.f32  // 0.0-1.0 for LOD transition blending
-})
+export const LODLevel = {
+  current: new Uint8Array(N),
+  target: new Uint8Array(N),
+  blendAlpha: new Float32Array(N)  // 0.0-1.0 for LOD transition blending
+}
 ```
 
 ### Mesh Reference Components
@@ -120,114 +127,115 @@ These store indices into Three.js container objects, NOT Three.js objects themse
 
 ```typescript
 // Index into a BatchedMesh (terrain chunks, city detail meshes)
-export const MeshRef = defineComponent({
-  batchId: Types.ui16,     // which BatchedMesh (0=LOD0, 1=LOD1, 2=LOD2, 3=LOD3)
-  geometryId: Types.i32    // index returned by BatchedMesh.addGeometry(), -1 = none
-})
+export const MeshRef = {
+  batchId: new Uint16Array(N),     // which BatchedMesh (0=LOD0, 1=LOD1, 2=LOD2, 3=LOD3)
+  geometryId: new Int32Array(N)    // index returned by BatchedMesh.addGeometry(), -1 = none
+}
 
 // Index into an InstancedMesh (trees, agents, icons, ships)
-export const InstanceRef = defineComponent({
-  poolId: Types.ui8,       // which InstancedMesh pool (see InstancePool enum)
-  instanceId: Types.i32    // index in the InstancedMesh, -1 = none
-})
+export const InstanceRef = {
+  poolId: new Uint8Array(N),       // which InstancedMesh pool (see InstancePool enum)
+  instanceId: new Int32Array(N)    // index in the InstancedMesh, -1 = none
+}
 ```
 
 ### City Components
 
 ```typescript
 // City metadata (maps from cities table)
-export const CityInfo = defineComponent({
-  tier: Types.ui8,           // 1=world wonder, 2=major, 3=notable, 4=small/village
-  population: Types.ui32,
-  provinceNumber: Types.ui8, // 1-41
-  culture: Types.ui8,        // enum: 0=roman,1=greek,2=egyptian,...
-  isHarbor: Types.ui8,       // boolean as uint8
-  isCapital: Types.ui8       // boolean as uint8
-})
+export const CityInfo = {
+  tier: new Uint8Array(N),           // 1=world wonder, 2=major, 3=notable, 4=small/village
+  population: new Uint32Array(N),
+  provinceNumber: new Uint8Array(N), // 1-41
+  culture: new Uint8Array(N),        // enum: 0=roman,1=greek,2=egyptian,...
+  isHarbor: new Uint8Array(N),       // boolean as uint8
+  isCapital: new Uint8Array(N)       // boolean as uint8
+}
 
 // LOD-specific city display state
-export const CityDisplay = defineComponent({
-  lodMode: Types.ui8         // 0=icon, 1=cluster, 2=detail
-})
+export const CityDisplay = {
+  lodMode: new Uint8Array(N)         // 0=icon, 1=cluster, 2=detail
+}
 ```
 
 ### Agent Components
 
 ```typescript
 // Agent type and role (maps from agents table)
-export const AgentRole = defineComponent({
-  agentType: Types.ui8,      // enum: 0=trader,1=ship,2=legion,3=citizen,...
-  role: Types.ui8,            // enum: 0=market_walker,1=service_walker,...
-  state: Types.ui8            // enum: 0=idle,1=moving,2=trading,...
-})
+export const AgentRole = {
+  agentType: new Uint8Array(N),      // enum: 0=trader,1=ship,2=legion,3=citizen,...
+  role: new Uint8Array(N),           // enum: 0=market_walker,1=service_walker,...
+  state: new Uint8Array(N)           // enum: 0=idle,1=moving,2=trading,...
+}
 
 // Agent movement interpolation
-export const AgentMovement = defineComponent({
-  prevX: Types.f32,          // position at last server tick
-  prevY: Types.f32,
-  nextX: Types.f32,          // target position (from server)
-  nextY: Types.f32,
-  interpT: Types.f32,        // 0.0-1.0 interpolation factor
-  speed: Types.f32,          // tiles/second
-  heading: Types.f32         // radians
-})
+export const AgentMovement = {
+  prevX: new Float32Array(N),        // position at last server tick
+  prevY: new Float32Array(N),
+  nextX: new Float32Array(N),        // target position (from server)
+  nextY: new Float32Array(N),
+  interpT: new Float32Array(N),      // 0.0-1.0 interpolation factor
+  speed: new Float32Array(N),        // tiles/second
+  heading: new Float32Array(N)       // radians
+}
 ```
 
 ### Environment Components
 
 ```typescript
 // Tree species variant
-export const TreeVariant = defineComponent({
-  species: Types.ui8,        // 0=cypress,1=oak,2=palm,3=olive,4=pine
-  scale: Types.f32           // size variation multiplier
-})
+export const TreeVariant = {
+  species: new Uint8Array(N),        // 0=cypress,1=oak,2=palm,3=olive,4=pine
+  scale: new Float32Array(N)         // size variation multiplier
+}
 
 // Province entity (metadata, not per-tile)
-export const ProvinceTag = defineComponent({
-  number: Types.ui8,         // 1-41 (0 = barbarian)
-  culture: Types.ui8         // enum matching CityInfo.culture
-})
+export const ProvinceTag = {
+  number: new Uint8Array(N),         // 1-41 (0 = barbarian)
+  culture: new Uint8Array(N)         // enum matching CityInfo.culture
+}
 
 // Resource site
-export const ResourceSite = defineComponent({
-  resourceType: Types.ui8,   // 0-23 (24 resource types)
-  harvestState: Types.ui8,   // 0=idle, 1=work, 2=haul, 3=recover
-  stateTimer: Types.f32,     // seconds remaining in current state
-  fieldSizeX: Types.ui8,
-  fieldSizeY: Types.ui8
-})
+export const ResourceSite = {
+  resourceType: new Uint8Array(N),   // 0-23 (24 resource types)
+  harvestState: new Uint8Array(N),   // 0=idle, 1=work, 2=haul, 3=recover
+  stateTimer: new Float32Array(N),   // seconds remaining in current state
+  fieldSizeX: new Uint8Array(N),
+  fieldSizeY: new Uint8Array(N)
+}
 ```
 
 ### Sync and Lifecycle Components
 
 ```typescript
 // Server synchronization tracking
-export const ServerSync = defineComponent({
-  lastTick: Types.ui32,      // last server tick this entity was updated from
-  missedPolls: Types.ui8,    // consecutive polls without server data (despawn after 3)
-  dirty: Types.ui8           // 1 = needs reconciliation
-})
+export const ServerSync = {
+  lastTick: new Uint32Array(N),      // last server tick this entity was updated from
+  missedPolls: new Uint8Array(N),    // consecutive polls without server data (despawn after 3)
+  dirty: new Uint8Array(N)           // 1 = needs reconciliation
+}
 
 // Visibility flag (frustum culled, zoom filtered, or explicitly hidden)
-export const Visible = defineComponent({
-  value: Types.ui8           // 0 = hidden, 1 = visible
-})
+export const Visible = {
+  value: new Uint8Array(N)           // 0 = hidden, 1 = visible
+}
 ```
 
 ### Tag Components
 
 Tag components have no data fields. They act as markers for query filtering.
+In bitECS v0.4.0, tags are empty objects.
 
 ```typescript
-export const IsChunk = defineComponent()
-export const IsCity = defineComponent()
-export const IsAgent = defineComponent()
-export const IsTree = defineComponent()
-export const IsProvince = defineComponent()
-export const IsResource = defineComponent()
-export const IsCamera = defineComponent()
-export const IsWater = defineComponent()
-export const IsLabel = defineComponent()
+export const IsChunk = {}
+export const IsCity = {}
+export const IsAgent = {}
+export const IsTree = {}
+export const IsProvince = {}
+export const IsResource = {}
+export const IsCamera = {}
+export const IsWater = {}
+export const IsLabel = {}
 ```
 
 ---
@@ -236,88 +244,90 @@ export const IsLabel = defineComponent()
 
 An archetype is the set of components added to an entity at creation time. These define the "shape" of each game object.
 
+Note: In bitECS v0.4.0, `addComponent` parameter order is `(world, eid, component)` (entity before component).
+
 ### Chunk Entity
 
 ```typescript
-addComponent(world, IsChunk, eid)
-addComponent(world, ChunkCoord, eid)
-addComponent(world, LODLevel, eid)
-addComponent(world, MeshRef, eid)
-addComponent(world, Visible, eid)
+addComponent(world, eid, IsChunk)
+addComponent(world, eid, ChunkCoord)
+addComponent(world, eid, LODLevel)
+addComponent(world, eid, MeshRef)
+addComponent(world, eid, Visible)
 ```
 
 ### City Entity
 
 ```typescript
-addComponent(world, IsCity, eid)
-addComponent(world, Position, eid)
-addComponent(world, CityInfo, eid)
-addComponent(world, CityDisplay, eid)
-addComponent(world, LODLevel, eid)
-addComponent(world, MeshRef, eid)       // for LOD0 detail / LOD1 cluster
-addComponent(world, InstanceRef, eid)   // for LOD2 icon
-addComponent(world, Visible, eid)
-addComponent(world, ServerSync, eid)
+addComponent(world, eid, IsCity)
+addComponent(world, eid, Position)
+addComponent(world, eid, CityInfo)
+addComponent(world, eid, CityDisplay)
+addComponent(world, eid, LODLevel)
+addComponent(world, eid, MeshRef)       // for LOD0 detail / LOD1 cluster
+addComponent(world, eid, InstanceRef)   // for LOD2 icon
+addComponent(world, eid, Visible)
+addComponent(world, eid, ServerSync)
 ```
 
 ### Agent Entity
 
 ```typescript
-addComponent(world, IsAgent, eid)
-addComponent(world, Position, eid)
-addComponent(world, Rotation, eid)
-addComponent(world, AgentRole, eid)
-addComponent(world, AgentMovement, eid)
-addComponent(world, InstanceRef, eid)
-addComponent(world, Visible, eid)
-addComponent(world, ServerSync, eid)
+addComponent(world, eid, IsAgent)
+addComponent(world, eid, Position)
+addComponent(world, eid, Rotation)
+addComponent(world, eid, AgentRole)
+addComponent(world, eid, AgentMovement)
+addComponent(world, eid, InstanceRef)
+addComponent(world, eid, Visible)
+addComponent(world, eid, ServerSync)
 ```
 
 ### Tree Entity
 
 ```typescript
-addComponent(world, IsTree, eid)
-addComponent(world, Position, eid)
-addComponent(world, TreeVariant, eid)
-addComponent(world, InstanceRef, eid)
-addComponent(world, Visible, eid)
+addComponent(world, eid, IsTree)
+addComponent(world, eid, Position)
+addComponent(world, eid, TreeVariant)
+addComponent(world, eid, InstanceRef)
+addComponent(world, eid, Visible)
 ```
 
 ### Province Entity
 
 ```typescript
-addComponent(world, IsProvince, eid)
-addComponent(world, ProvinceTag, eid)
-addComponent(world, Position, eid)       // label_point for name rendering
-addComponent(world, Visible, eid)
+addComponent(world, eid, IsProvince)
+addComponent(world, eid, ProvinceTag)
+addComponent(world, eid, Position)       // label_point for name rendering
+addComponent(world, eid, Visible)
 ```
 
 ### Resource Site Entity
 
 ```typescript
-addComponent(world, IsResource, eid)
-addComponent(world, Position, eid)
-addComponent(world, ResourceSite, eid)
-addComponent(world, InstanceRef, eid)
-addComponent(world, Visible, eid)
-addComponent(world, ServerSync, eid)
+addComponent(world, eid, IsResource)
+addComponent(world, eid, Position)
+addComponent(world, eid, ResourceSite)
+addComponent(world, eid, InstanceRef)
+addComponent(world, eid, Visible)
+addComponent(world, eid, ServerSync)
 ```
 
 ### Camera Entity (Singleton)
 
 ```typescript
-addComponent(world, IsCamera, eid)
-addComponent(world, Position, eid)
-addComponent(world, Rotation, eid)
-addComponent(world, Velocity, eid)
+addComponent(world, eid, IsCamera)
+addComponent(world, eid, Position)
+addComponent(world, eid, Rotation)
+addComponent(world, eid, Velocity)
 ```
 
 ### Water Plane Entity (Singleton)
 
 ```typescript
-addComponent(world, IsWater, eid)
-addComponent(world, MeshRef, eid)
-addComponent(world, Visible, eid)
+addComponent(world, eid, IsWater)
+addComponent(world, eid, MeshRef)
+addComponent(world, eid, Visible)
 ```
 
 ---
@@ -354,13 +364,12 @@ Systems are stateless functions that query component compositions and execute lo
 
 ```typescript
 // client/src/ecs/systems/agentInterpolationSystem.ts
-import { defineQuery, defineSystem } from 'bitecs'
+// bitECS v0.4.0 API: query() is a standalone function, systems are plain functions.
+import { query } from 'bitecs'
 import { IsAgent, Position, AgentMovement, Rotation } from '../components'
 
-const agentQuery = defineQuery([IsAgent, Position, AgentMovement, Rotation])
-
-export const agentInterpolationSystem = defineSystem((world) => {
-  const eids = agentQuery(world)
+export function agentInterpolationSystem(world: World, delta: number): void {
+  const eids = query(world, [IsAgent, Position, AgentMovement, Rotation])
   for (let i = 0; i < eids.length; i++) {
     const eid = eids[i]
     const t = AgentMovement.interpT[eid]
@@ -370,7 +379,7 @@ export const agentInterpolationSystem = defineSystem((world) => {
     Position.y[eid] = AgentMovement.prevY[eid] + (AgentMovement.nextY[eid] - AgentMovement.prevY[eid]) * t
 
     // Advance interpolation factor
-    AgentMovement.interpT[eid] = Math.min(1.0, t + AgentMovement.speed[eid] * world.delta * 0.5)
+    AgentMovement.interpT[eid] = Math.min(1.0, t + AgentMovement.speed[eid] * delta * 0.5)
 
     // Update heading from movement direction
     const dx = AgentMovement.nextX[eid] - AgentMovement.prevX[eid]
@@ -379,8 +388,7 @@ export const agentInterpolationSystem = defineSystem((world) => {
       Rotation.yaw[eid] = Math.atan2(dy, dx)
     }
   }
-  return world
-})
+}
 ```
 
 ---
@@ -407,10 +415,12 @@ Server entities have UUIDs. ECS entities have numeric EIDs. A bidirectional map 
 
 ```typescript
 // client/src/ecs/serverEntityMap.ts
+import { addEntity, removeEntity, World } from 'bitecs'
+
 const uuidToEid = new Map<string, number>()
 const eidToUuid = new Map<number, string>()
 
-export function getOrCreateEntity(world: IWorld, uuid: string, archetype: (w: IWorld, eid: number) => void): number {
+export function getOrCreateEntity(world: World, uuid: string, archetype: (w: World, eid: number) => void): number {
   let eid = uuidToEid.get(uuid)
   if (eid === undefined) {
     eid = addEntity(world)
@@ -421,7 +431,7 @@ export function getOrCreateEntity(world: IWorld, uuid: string, archetype: (w: IW
   return eid
 }
 
-export function removeServerEntity(world: IWorld, uuid: string): void {
+export function removeServerEntity(world: World, uuid: string): void {
   const eid = uuidToEid.get(uuid)
   if (eid !== undefined) {
     removeEntity(world, eid)
@@ -580,10 +590,10 @@ The project currently uses an `EventBus` for cross-system communication. ECS obs
 
 | Old Event | ECS Replacement |
 |-----------|----------------|
-| `chunk_loaded` | `enterQuery` on IsChunk + MeshRef (geometry populated) |
-| `chunk_unloaded` | `exitQuery` on IsChunk + Visible |
-| `agent_spawned` | `enterQuery` on IsAgent |
-| `agent_despawned` | `exitQuery` on IsAgent |
+| `chunk_loaded` | `enterQuery(world, [IsChunk, MeshRef])` — entities entering query (geometry populated) |
+| `chunk_unloaded` | `exitQuery(world, [IsChunk, Visible])` — entities leaving query |
+| `agent_spawned` | `enterQuery(world, [IsAgent])` — new agent entities |
+| `agent_despawned` | `exitQuery(world, [IsAgent])` — removed agent entities |
 | `city_lod_changed` | `CityLODSystem` directly manages transitions |
 
 ### Retained on EventBus
@@ -680,8 +690,9 @@ During migration, existing `GameSystem` classes may read ECS component data but 
 
 - All systems run on the main thread in the defined order (Section 5).
 - Workers do NOT run ECS systems. Workers receive raw TypedArrays and return mesh data.
-- The render loop calls `pipeline(world)` once per frame. `pipeline` is a composed function of all systems.
+- The render loop calls `pipeline(world, delta)` once per frame. `pipeline` calls all systems in order.
 - Systems that run at reduced frequency (e.g., every 2s) use internal tick counters stored on the world object.
+- Systems are plain functions `(world: World, delta: number) => void`, not `defineSystem()` wrappers.
 
 ---
 

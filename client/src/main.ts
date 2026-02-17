@@ -1,9 +1,8 @@
 /**
  * Application entry point.
  *
- * Creates the Engine, registers all game systems in order, and starts
- * the render loop. Each system is self-contained and manages its own
- * lifecycle through the GameSystem interface.
+ * Loads heightmap data, creates the Engine, registers all game systems
+ * in order, and starts the render loop.
  *
  * System registration order matters: systems update() in this order.
  */
@@ -17,44 +16,57 @@ import {
   CitySystem,
   TreeSystem,
   TextLabelSystem,
+  AgentSystem,
+  ParticleSystemWrapper,
   PostProcessingSystem,
   HudSystem,
   InteractionSystem,
 } from './engine/systems';
 import { testSupabaseConnection } from './supabase';
+import { loadHeightmaps } from './world/heightmapLoader';
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 
-const app = document.querySelector<HTMLDivElement>('#app');
-if (!app) throw new Error('App mount point #app missing');
+async function init(): Promise<void> {
+  const app = document.querySelector<HTMLDivElement>('#app');
+  if (!app) throw new Error('App mount point #app missing');
 
-const engine = new Engine(app);
+  // Load heightmap and province map before engine starts
+  await loadHeightmaps();
 
-// Register systems in update order:
-// 1. Camera first (other systems read camera position)
-// 2. Terrain (loads chunks based on camera)
-// 3. World renderers (provinces, cities, trees, water)
-// 4. Text labels (SDF labels for cities and provinces)
-// 5. Post-processing (renders the final frame)
-// 6. HUD + interaction (UI overlay, input handling)
-engine.register(new CameraSystem());
-engine.register(new TerrainSystem());
-engine.register(new WaterSystem());
-engine.register(new ProvinceSystem());
-engine.register(new CitySystem());
-engine.register(new TreeSystem());
-engine.register(new TextLabelSystem());
-engine.register(new PostProcessingSystem());
-engine.register(new HudSystem());
-engine.register(new InteractionSystem());
+  const engine = new Engine(app);
 
-engine.start();
+  // Register systems in update order:
+  // 1. Camera first (other systems read camera position)
+  // 2. Terrain (loads chunks based on camera)
+  // 3. World renderers (provinces, cities, trees, water)
+  // 4. Text labels (SDF labels for cities and provinces)
+  // 5. Post-processing (renders the final frame)
+  // 6. HUD + interaction (UI overlay, input handling)
+  engine.register(new CameraSystem());
+  engine.register(new TerrainSystem());
+  engine.register(new WaterSystem());
+  engine.register(new ProvinceSystem());
+  engine.register(new CitySystem());
+  engine.register(new TreeSystem());
+  engine.register(new TextLabelSystem());
+  engine.register(new AgentSystem());
+  engine.register(new ParticleSystemWrapper());
+  engine.register(new PostProcessingSystem());
+  engine.register(new HudSystem());
+  engine.register(new InteractionSystem());
 
-// ── Supabase Connection Check ─────────────────────────────────────
+  engine.start();
 
-testSupabaseConnection().then((isOnline) => {
-  const statusNode = document.querySelector<HTMLDivElement>('#status');
-  if (statusNode) {
-    statusNode.textContent = `Supabase: ${isOnline ? 'connected' : 'not configured'}`;
-  }
+  // ── Supabase Connection Check ─────────────────────────────────
+  testSupabaseConnection().then((isOnline) => {
+    const statusNode = document.querySelector<HTMLDivElement>('#status');
+    if (statusNode) {
+      statusNode.textContent = `Supabase: ${isOnline ? 'connected' : 'not configured'}`;
+    }
+  });
+}
+
+init().catch((e) => {
+  console.error('Failed to initialize:', e);
 });

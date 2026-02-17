@@ -22,6 +22,9 @@ import { TreeRenderer } from '../world/treeRenderer';
 import { PostProcessingPipeline } from '../rendering/postProcessing';
 import { TextLabelRenderer } from '../world/textLabels';
 import { CITY_DATABASE } from '../world/cityDatabase';
+import { AgentRenderer } from '../world/agentRenderer';
+import { ParticleSystem } from '../world/particleSystem';
+import { getHeightmapData, hasHeightmap } from '../world/heightmapLoader';
 
 // ── Base ──────────────────────────────────────────────────────────
 
@@ -101,6 +104,26 @@ export class WaterSystem extends BaseSystem {
 
   protected onInit(engine: Engine): void {
     this.renderer = new WaterRenderer(engine.scene);
+
+    // Pass heightmap to water shader for coastal foam detection
+    if (hasHeightmap()) {
+      const hmData = getHeightmapData();
+      if (hmData) {
+        const tex = new THREE.DataTexture(
+          hmData,
+          MAP_SIZE,
+          MAP_SIZE,
+          THREE.RedFormat,
+          THREE.UnsignedByteType,
+        );
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+        this.renderer.setHeightmapTexture(tex);
+      }
+    }
   }
 
   update(_dt: number, elapsed: number): void {
@@ -131,8 +154,8 @@ export class ProvinceSystem extends BaseSystem {
     });
   }
 
-  update(): void {
-    this.renderer.update(this.engine.camera.position.y);
+  update(_dt: number, elapsed: number): void {
+    this.renderer.update(this.engine.camera.position.y, elapsed);
   }
 
   dispose(): void {
@@ -203,6 +226,46 @@ export class TextLabelSystem extends BaseSystem {
 
   dispose(): void {
     this.renderer.dispose();
+  }
+}
+
+// ── Agents ───────────────────────────────────────────────────────
+
+export class AgentSystem extends BaseSystem {
+  readonly name = 'agents';
+  renderer!: AgentRenderer;
+
+  protected onInit(engine: Engine): void {
+    this.renderer = new AgentRenderer(engine.scene);
+  }
+
+  update(_dt: number, elapsed: number): void {
+    const cam = this.engine.camera.position;
+    this.renderer.update(cam.x, cam.y, cam.z, elapsed);
+  }
+
+  dispose(): void {
+    this.renderer.dispose();
+  }
+}
+
+// ── Particles ────────────────────────────────────────────────────
+
+export class ParticleSystemWrapper extends BaseSystem {
+  readonly name = 'particles';
+  particles!: ParticleSystem;
+
+  protected onInit(engine: Engine): void {
+    this.particles = new ParticleSystem(engine.scene);
+  }
+
+  update(_dt: number, elapsed: number): void {
+    const cam = this.engine.camera.position;
+    this.particles.update(cam.x, cam.y, cam.z, elapsed);
+  }
+
+  dispose(): void {
+    this.particles.dispose();
   }
 }
 

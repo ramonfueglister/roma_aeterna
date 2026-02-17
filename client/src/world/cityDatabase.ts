@@ -13,6 +13,8 @@
 import * as THREE from 'three';
 import { MAP_SIZE } from '../config';
 import type { CityData, CityTier, CultureType } from '../types';
+import { BuildingRenderer, generateCityLayout } from './buildingGenerator';
+import type { PlacedBuilding } from './buildingGenerator';
 
 // ── Coordinate helpers ──────────────────────────────────────────
 
@@ -267,6 +269,13 @@ export class CityRenderer {
   private readonly cityWorldPositions: ReadonlyMap<string, THREE.Vector3>;
   private readonly allCities: readonly CityData[];
 
+  /** Building renderer for detail view. */
+  private readonly buildingRenderer: BuildingRenderer;
+  /** Cached building layouts per city (generated once). */
+  private readonly buildingLayouts: Map<string, PlacedBuilding[]> = new Map();
+  /** Whether buildings are currently shown. */
+  private buildingsVisible = false;
+
   /** Reusable objects to avoid per-frame allocation. */
   private readonly _mat4 = new THREE.Matrix4();
   private readonly _vec3 = new THREE.Vector3();
@@ -291,6 +300,7 @@ export class CityRenderer {
     this.scene.add(this.group);
 
     this.allCities = CITY_DATABASE;
+    this.buildingRenderer = new BuildingRenderer(scene);
 
     // Pre-compute world positions
     const positions = new Map<string, THREE.Vector3>();
@@ -382,15 +392,59 @@ export class CityRenderer {
 
     if (zone !== this.currentZone) {
       this.rebuildMeshes(zone, cameraX, cameraZ);
+      this.updateBuildings(zone, cameraX, cameraZ);
       this.currentZone = zone;
       this.lastCameraX = cameraX;
       this.lastCameraZ = cameraZ;
     } else if (zone !== ViewZone.Strategic && cameraMoved) {
-      // For tactical/detail, update visibility when camera moves significantly
       this.updateInstanceVisibility(zone, cameraX, cameraZ);
+      if (zone === ViewZone.Detail) {
+        this.updateBuildings(zone, cameraX, cameraZ);
+      }
       this.lastCameraX = cameraX;
       this.lastCameraZ = cameraZ;
     }
+  }
+
+  /**
+   * Show/hide building clusters based on zoom level and camera position.
+   */
+  private updateBuildings(zone: ViewZone, cameraX: number, cameraZ: number): void {
+    if (zone !== ViewZone.Detail) {
+      if (this.buildingsVisible) {
+        this.buildingRenderer.setVisible(false);
+        this.buildingsVisible = false;
+      }
+      return;
+    }
+
+    // Collect buildings for nearby cities
+    const allBuildings: PlacedBuilding[] = [];
+    const rangeSq = DETAIL_RANGE * DETAIL_RANGE;
+
+    for (const c of this.allCities) {
+      const pos = this.cityWorldPositions.get(c.id);
+      if (!pos) continue;
+      const dx = pos.x - cameraX;
+      const dz = pos.z - cameraZ;
+      if (dx * dx + dz * dz > rangeSq) continue;
+
+      // Get or generate layout
+      let layout = this.buildingLayouts.get(c.id);
+      if (!layout) {
+        layout = generateCityLayout(
+          c.id, c.tier, c.culture,
+          pos.x, pos.z, MARKER_Y,
+        );
+        this.buildingLayouts.set(c.id, layout);
+      }
+
+      allBuildings.push(...layout);
+    }
+
+    this.buildingRenderer.rebuild(allBuildings);
+    this.buildingRenderer.setVisible(true);
+    this.buildingsVisible = true;
   }
 
   raycast(raycaster: THREE.Raycaster): CityData | null {
@@ -428,6 +482,7 @@ export class CityRenderer {
 
   dispose(): void {
     this.clearAllMeshes();
+    this.buildingRenderer.dispose();
 
     // Dispose shared geometries
     for (const [, geo] of this.diamondGeos) {

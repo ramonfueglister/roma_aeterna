@@ -109,6 +109,9 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3  uSpecularColor;
   uniform float uOpacity;
   uniform bool  uEnableFoam;
+  uniform sampler2D uHeightMap;
+  uniform bool  uHasHeightMap;
+  uniform float uMapSize;
 
   varying vec3  vWorldPos;
   varying vec3  vNormal;
@@ -130,6 +133,15 @@ const FRAGMENT_SHADER = /* glsl */ `
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
   }
 
+  // Sample terrain height from heightmap at world position
+  float sampleTerrainHeight(vec2 worldXZ) {
+    if (!uHasHeightMap) return 0.0;
+    // Convert world position to UV (world origin offset by half map)
+    vec2 uv = (worldXZ + uMapSize * 0.5) / uMapSize;
+    uv = clamp(uv, 0.0, 1.0);
+    return texture2D(uHeightMap, uv).r * 255.0;
+  }
+
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -140,10 +152,21 @@ const FRAGMENT_SHADER = /* glsl */ `
     float fresnel  = pow(1.0 - cosTheta, 4.0);
     fresnel = mix(0.04, 1.0, fresnel); // F0 = 0.04 for water
 
+    // ── Heightmap-based depth ────────────────────────────────────
+    float terrainH = sampleTerrainHeight(vWorldPos.xz);
+    // WATER_LEVEL = 32, terrain near coast has height ~32-35
+    float coastProximity = smoothstep(28.0, 34.0, terrainH);
+    // Deep ocean: terrain height < 15, coastal: terrain height > 28
+    float depthFromTerrain = 1.0 - smoothstep(8.0, 28.0, terrainH);
+
     // ── Depth-based colour blend ──────────────────────────────────
-    // Use wave height as a proxy for local depth variation
+    // Combine wave height variation with terrain-based depth
     float depthFactor = smoothstep(-1.5, 1.5, vWaveHeight);
-    vec3 waterColor = mix(uDeepColor, uShallowColor, depthFactor);
+    if (uHasHeightMap) {
+      // Terrain depth is primary driver, wave height adds variation
+      depthFactor = mix(depthFromTerrain, depthFactor, 0.2);
+    }
+    vec3 waterColor = mix(uShallowColor, uDeepColor, depthFactor);
 
     // Subtle animated ripple tint variation
     float ripple = noise2D(vWorldPos.xz * 0.015 + uTime * 0.15);
@@ -164,12 +187,26 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 specular = uSpecularColor * (spec + specBroad);
 
-    // ── Foam at wave peaks ────────────────────────────────────────
+    // ── Foam ─────────────────────────────────────────────────────
     vec3 foamContrib = vec3(0.0);
     if (uEnableFoam) {
       float foamNoise = noise2D(vWorldPos.xz * 0.03 + uTime * 0.25);
-      float foamThreshold = smoothstep(1.2, 2.0, vWaveHeight + foamNoise * 0.8);
-      foamContrib = vec3(0.85, 0.92, 0.95) * foamThreshold * 0.6;
+
+      // Wave-peak foam (existing)
+      float waveFoam = smoothstep(1.2, 2.0, vWaveHeight + foamNoise * 0.8);
+
+      // Coastal foam: white foam where water meets land
+      float coastFoam = 0.0;
+      if (uHasHeightMap) {
+        float coastNoise = noise2D(vWorldPos.xz * 0.08 + uTime * 0.4);
+        // Foam appears where terrain height is near water level
+        coastFoam = coastProximity * (0.5 + coastNoise * 0.5);
+        // Animated wash effect
+        coastFoam *= 0.6 + 0.4 * sin(uTime * 1.5 + vWorldPos.x * 0.1 + vWorldPos.z * 0.08);
+      }
+
+      float totalFoam = max(waveFoam, coastFoam);
+      foamContrib = vec3(0.85, 0.92, 0.95) * totalFoam * 0.6;
     }
 
     // ── Sky reflection approximation ──────────────────────────────
@@ -230,6 +267,10 @@ export class WaterRenderer {
         uSpecularColor: { value: new THREE.Color(0xfff0c8) },   // golden highlight
         uOpacity:       { value: 0.82 },
         uEnableFoam:    { value: true },
+        // Heightmap for coastal detection
+        uHeightMap:     { value: null as THREE.Texture | null },
+        uHasHeightMap:  { value: false },
+        uMapSize:       { value: MAP_SIZE },
       },
     });
 
@@ -250,6 +291,17 @@ export class WaterRenderer {
     const uCameraPos = this.material.uniforms['uCameraPos'];
     if (uTime) uTime.value = time;
     if (uCameraPos) (uCameraPos.value as THREE.Vector3).copy(cameraPosition);
+  }
+
+  /**
+   * Provide the heightmap texture for coastal foam detection.
+   * The texture should be the same heightmap loaded by heightmapLoader.
+   */
+  setHeightmapTexture(texture: THREE.Texture): void {
+    const uHeightMap = this.material.uniforms['uHeightMap'];
+    const uHasHeightMap = this.material.uniforms['uHasHeightMap'];
+    if (uHeightMap) uHeightMap.value = texture;
+    if (uHasHeightMap) uHasHeightMap.value = true;
   }
 
   /**

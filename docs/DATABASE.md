@@ -564,6 +564,48 @@ CREATE OR REPLACE FUNCTION batch_move_agents(
 $$ LANGUAGE sql;
 ```
 
+### Bulk chunk loading: chunks in viewport
+
+Clients load chunks in batches via viewport bounding box, not individual queries. This is critical
+for cold-start performance (loading 100+ LOD3 chunks at startup).
+
+```sql
+CREATE OR REPLACE FUNCTION get_chunks_in_viewport(
+  x_min smallint, x_max smallint,
+  y_min smallint, y_max smallint,
+  target_lod smallint
+) RETURNS TABLE (
+  x smallint,
+  y smallint,
+  lod smallint,
+  data bytea,
+  version smallint
+) AS $$
+  SELECT c.x, c.y, c.lod, c.data, c.version
+  FROM chunks c
+  WHERE c.x BETWEEN x_min AND x_max
+    AND c.y BETWEEN y_min AND y_max
+    AND c.lod = target_lod
+  ORDER BY c.x, c.y;
+$$ LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp;
+```
+
+**Loading strategy (canonical pattern):**
+
+1. **IndexedDB first**: Client checks idb-keyval cache for each chunk (key: `chunk:{x}:{y}:{lod}:{version}`).
+2. **Cache miss → Supabase batch**: Missing chunks are fetched in a single `get_chunks_in_viewport` RPC call.
+3. **Cache write**: Fetched chunks are stored to IndexedDB for subsequent visits.
+4. **Procedural fallback**: During development (before full pipeline seed), the client may generate chunks procedurally on the fly. These procedurally generated chunks are cached in IndexedDB but are NOT authoritative — they are replaced when Supabase chunk data becomes available.
+
+This pattern means "ALL game data in Supabase PostgreSQL" holds as the authoritative source, while IndexedDB serves as a throughput cache and procedural generation serves as a development-time convenience.
+
+```sql
+-- Grant viewport chunk loading to client roles
+REVOKE EXECUTE ON FUNCTION get_chunks_in_viewport(smallint, smallint, smallint, smallint, smallint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION get_chunks_in_viewport(smallint, smallint, smallint, smallint, smallint) TO anon, authenticated;
+```
+
 ### Tick lock functions (single-writer guard)
 
 ```sql

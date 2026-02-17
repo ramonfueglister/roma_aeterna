@@ -1,18 +1,22 @@
 /**
  * Voxel-style tree instance rendering system.
  *
- * Renders MagicaVoxel-style blocky trees (Mediterranean Pine, Oak, Olive)
- * via InstancedMesh for minimal draw calls. Trees are placed on FOREST,
- * DENSE_FOREST, and OLIVE_GROVE biome tiles using deterministic hashing.
+ * Renders MagicaVoxel-style blocky trees (7 variants: Mediterranean Pine,
+ * Oak, Olive, Cypress, Umbrella Pine, Date Palm, Cedar) via InstancedMesh
+ * for minimal draw calls. Trees are placed on FOREST, DENSE_FOREST, and
+ * OLIVE_GROVE biome tiles using deterministic hashing.
  *
  * Tree positions are accumulated from chunk data as chunks load (same
  * accumulation pattern as ProvinceRenderer). Camera-distance culling and
  * instance caps keep the GPU budget tight.
  *
- * Two InstancedMesh draw calls total: one for trunk boxes, one for canopy
- * boxes -- but we merge trunk+canopy into a single geometry per variant
- * and use a single InstancedMesh with vertex colors, so it is actually
- * one draw call.
+ * Regional variant selection uses world Y coordinate as a latitude proxy
+ * (low Y = northern Europe, high Y = southern Africa/Egypt) combined with
+ * altitude for mountain cedar placement. Per-instance scale variation
+ * (0.8-1.2x) adds visual diversity without additional draw calls.
+ *
+ * One InstancedMesh per variant (7 draw calls max), each with merged
+ * trunk + canopy geometry and baked vertex colors.
  */
 
 import * as THREE from 'three';
@@ -40,7 +44,14 @@ const enum TreeVariant {
   MEDITERRANEAN_PINE = 0,
   OAK = 1,
   OLIVE = 2,
+  CYPRESS = 3,
+  UMBRELLA_PINE = 4,
+  DATE_PALM = 5,
+  CEDAR = 6,
 }
+
+/** Total number of tree variants. */
+const VARIANT_COUNT = 7;
 
 // ---------------------------------------------------------------------------
 // Colors
@@ -48,9 +59,14 @@ const enum TreeVariant {
 
 const TRUNK_COLOR = new THREE.Color(0x5a3a1a);
 const TRUNK_COLOR_ALT = new THREE.Color(0x6a4a2a);
+const TRUNK_COLOR_PALM = new THREE.Color(0x7a5a2a);
 const PINE_CANOPY_COLOR = new THREE.Color(0x2a5420);
 const OAK_CANOPY_COLOR = new THREE.Color(0x3d6b2e);
 const OLIVE_CANOPY_COLOR = new THREE.Color(0x5a7a3a);
+const CYPRESS_CANOPY_COLOR = new THREE.Color(0x1a4420);
+const UMBRELLA_PINE_CANOPY_COLOR = new THREE.Color(0x2d5a1f);
+const DATE_PALM_CANOPY_COLOR = new THREE.Color(0x4a7a2a);
+const CEDAR_CANOPY_COLOR = new THREE.Color(0x1a4a30);
 
 // ---------------------------------------------------------------------------
 // Deterministic hash
@@ -76,6 +92,8 @@ interface TreePosition {
   readonly worldX: number;
   readonly worldY: number;
   readonly worldZ: number;
+  readonly tileX: number;
+  readonly tileY: number;
   readonly variant: TreeVariant;
 }
 
@@ -84,59 +102,30 @@ interface TreePosition {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a merged BoxGeometry (trunk + canopy) with per-vertex colors baked in.
- * Returns a non-indexed BufferGeometry ready for InstancedMesh.
+ * Create a single box with baked vertex colors, translated to the given offset.
  */
-function buildTreeGeometry(
-  trunkW: number,
-  trunkH: number,
-  trunkD: number,
-  canopyW: number,
-  canopyH: number,
-  canopyD: number,
-  canopyOffsetY: number,
-  trunkColor: THREE.Color,
-  canopyColor: THREE.Color,
+function makeColoredBox(
+  w: number,
+  h: number,
+  d: number,
+  offsetY: number,
+  color: THREE.Color,
 ): THREE.BufferGeometry {
-  // Create trunk box at origin, bottom at Y=0
-  const trunk = new THREE.BoxGeometry(trunkW, trunkH, trunkD);
-  trunk.translate(0, trunkH / 2, 0);
+  const box = new THREE.BoxGeometry(w, h, d);
+  box.translate(0, offsetY + h / 2, 0);
 
-  // Create canopy box offset above trunk
-  const canopy = new THREE.BoxGeometry(canopyW, canopyH, canopyD);
-  canopy.translate(0, canopyOffsetY + canopyH / 2, 0);
+  const verts = box.getAttribute('position');
+  if (!verts) throw new Error('Failed to create box geometry attributes');
 
-  // Bake vertex colors into each geometry before merging
-  const trunkVerts = trunk.getAttribute('position');
-  const canopyVerts = canopy.getAttribute('position');
-
-  if (!trunkVerts || !canopyVerts) {
-    throw new Error('Failed to create tree geometry attributes');
+  const colors = new Float32Array(verts.count * 3);
+  for (let i = 0; i < verts.count; i++) {
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
   }
+  box.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-  const trunkColors = new Float32Array(trunkVerts.count * 3);
-  for (let i = 0; i < trunkVerts.count; i++) {
-    trunkColors[i * 3] = trunkColor.r;
-    trunkColors[i * 3 + 1] = trunkColor.g;
-    trunkColors[i * 3 + 2] = trunkColor.b;
-  }
-  trunk.setAttribute('color', new THREE.BufferAttribute(trunkColors, 3));
-
-  const canopyColors = new Float32Array(canopyVerts.count * 3);
-  for (let i = 0; i < canopyVerts.count; i++) {
-    canopyColors[i * 3] = canopyColor.r;
-    canopyColors[i * 3 + 1] = canopyColor.g;
-    canopyColors[i * 3 + 2] = canopyColor.b;
-  }
-  canopy.setAttribute('color', new THREE.BufferAttribute(canopyColors, 3));
-
-  // Merge into single geometry
-  const merged = mergeBufferGeometries(trunk, canopy);
-
-  trunk.dispose();
-  canopy.dispose();
-
-  return merged;
+  return box;
 }
 
 /**
@@ -185,54 +174,121 @@ function mergeBufferGeometries(
   return merged;
 }
 
-// ---------------------------------------------------------------------------
-// Pre-built variant geometries (lazy-initialized singleton)
-// ---------------------------------------------------------------------------
-
-let pineGeometry: THREE.BufferGeometry | null = null;
-let oakGeometry: THREE.BufferGeometry | null = null;
-let oliveGeometry: THREE.BufferGeometry | null = null;
-
-function getPineGeometry(): THREE.BufferGeometry {
-  if (!pineGeometry) {
-    // Mediterranean Pine: tall thin trunk (1x4x1) + flat wide canopy (3x1x3)
-    pineGeometry = buildTreeGeometry(
-      1, 4, 1,     // trunk
-      3, 1, 3,     // canopy
-      4,           // canopy Y offset (on top of trunk)
-      TRUNK_COLOR,
-      PINE_CANOPY_COLOR,
-    );
+/**
+ * Merge an array of BufferGeometries into a single geometry.
+ * All inputs must have position, normal, and color attributes.
+ */
+function mergeGeometryArray(
+  geometries: THREE.BufferGeometry[],
+): THREE.BufferGeometry {
+  if (geometries.length === 0) {
+    throw new Error('Cannot merge zero geometries');
   }
-  return pineGeometry;
+  if (geometries.length === 1) {
+    return geometries[0]!;
+  }
+
+  let result = mergeBufferGeometries(geometries[0]!, geometries[1]!);
+  for (let i = 2; i < geometries.length; i++) {
+    const prev = result;
+    result = mergeBufferGeometries(prev, geometries[i]!);
+    prev.dispose();
+  }
+  return result;
 }
 
-function getOakGeometry(): THREE.BufferGeometry {
-  if (!oakGeometry) {
-    // Oak: short trunk (1x2x1) + rounded-ish canopy (2x2x2)
-    oakGeometry = buildTreeGeometry(
-      1, 2, 1,     // trunk
-      2, 2, 2,     // canopy
-      2,           // canopy Y offset
-      TRUNK_COLOR_ALT,
-      OAK_CANOPY_COLOR,
-    );
-  }
-  return oakGeometry;
+// ---------------------------------------------------------------------------
+// Pre-built variant geometries (lazy-initialized singletons)
+// ---------------------------------------------------------------------------
+
+const variantGeometries: Array<THREE.BufferGeometry | null> = new Array(VARIANT_COUNT).fill(null);
+
+function getVariantGeometry(variant: TreeVariant): THREE.BufferGeometry {
+  const cached = variantGeometries[variant];
+  if (cached) return cached;
+
+  const geom = buildVariantGeometry(variant);
+  variantGeometries[variant] = geom;
+  return geom;
 }
 
-function getOliveGeometry(): THREE.BufferGeometry {
-  if (!oliveGeometry) {
-    // Olive: very short trunk (1x1x1) + wide low canopy (3x1x2)
-    oliveGeometry = buildTreeGeometry(
-      1, 1, 1,     // trunk
-      3, 1, 2,     // canopy
-      1,           // canopy Y offset
-      TRUNK_COLOR,
-      OLIVE_CANOPY_COLOR,
-    );
+function buildVariantGeometry(variant: TreeVariant): THREE.BufferGeometry {
+  let parts: THREE.BufferGeometry[];
+
+  switch (variant) {
+    case TreeVariant.MEDITERRANEAN_PINE: {
+      // Improved: Trunk 1x3x1, Canopy 3x4x3, additional tip box 2x2x2 on top
+      const trunk = makeColoredBox(1, 3, 1, 0, TRUNK_COLOR);
+      const canopy = makeColoredBox(3, 4, 3, 3, PINE_CANOPY_COLOR);
+      const tip = makeColoredBox(2, 2, 2, 7, PINE_CANOPY_COLOR);
+      parts = [trunk, canopy, tip];
+      break;
+    }
+    case TreeVariant.OAK: {
+      // Improved: Trunk 1x2x1, Canopy 4x3x4 (wider, more lush)
+      const trunk = makeColoredBox(1, 2, 1, 0, TRUNK_COLOR_ALT);
+      const canopy = makeColoredBox(4, 3, 4, 2, OAK_CANOPY_COLOR);
+      parts = [trunk, canopy];
+      break;
+    }
+    case TreeVariant.OLIVE: {
+      // Improved: Trunk 1x2x1, Canopy asymmetric 3x2x4
+      const trunk = makeColoredBox(1, 2, 1, 0, TRUNK_COLOR);
+      const canopy = makeColoredBox(3, 2, 4, 2, OLIVE_CANOPY_COLOR);
+      parts = [trunk, canopy];
+      break;
+    }
+    case TreeVariant.CYPRESS: {
+      // Narrow and tall - Italian/Greek signature tree
+      // Trunk: 0.6x5x0.6, Canopy: 1.2x6x1.2 (tall columnar shape)
+      const trunk = makeColoredBox(0.6, 5, 0.6, 0, TRUNK_COLOR);
+      const canopy = makeColoredBox(1.2, 6, 1.2, 5, CYPRESS_CANOPY_COLOR);
+      parts = [trunk, canopy];
+      break;
+    }
+    case TreeVariant.UMBRELLA_PINE: {
+      // Flat wide canopy on long trunk - Roman iconic tree
+      // Trunk: 0.8x5x0.8, Canopy disk: 4x1.2x4 (flat wide disk on top)
+      const trunk = makeColoredBox(0.8, 5, 0.8, 0, TRUNK_COLOR);
+      const canopy = makeColoredBox(4, 1.2, 4, 5, UMBRELLA_PINE_CANOPY_COLOR);
+      parts = [trunk, canopy];
+      break;
+    }
+    case TreeVariant.DATE_PALM: {
+      // Thin trunk + fan-like top - Egyptian/Levantine
+      // Trunk: 0.6x6x0.6, Canopy: 3x2x3 (wider spread on top)
+      const trunk = makeColoredBox(0.6, 6, 0.6, 0, TRUNK_COLOR_PALM);
+      const canopy = makeColoredBox(3, 2, 3, 6, DATE_PALM_CANOPY_COLOR);
+      parts = [trunk, canopy];
+      break;
+    }
+    case TreeVariant.CEDAR: {
+      // Stepped/tiered shape - mountain forests
+      // Trunk: 0.8x2x0.8
+      // Bottom tier: 4x1.5x4 at Y=2
+      // Middle tier: 3x1.5x3 at Y=3.5
+      // Top tier: 2x1.5x2 at Y=5
+      const trunk = makeColoredBox(0.8, 2, 0.8, 0, TRUNK_COLOR);
+      const bottom = makeColoredBox(4, 1.5, 4, 2, CEDAR_CANOPY_COLOR);
+      const middle = makeColoredBox(3, 1.5, 3, 3.5, CEDAR_CANOPY_COLOR);
+      const top = makeColoredBox(2, 1.5, 2, 5, CEDAR_CANOPY_COLOR);
+      parts = [trunk, bottom, middle, top];
+      break;
+    }
+    default:
+      throw new Error(`Unknown tree variant: ${variant}`);
   }
-  return oliveGeometry;
+
+  const merged = mergeGeometryArray(parts);
+
+  // Dispose individual parts (mergeGeometryArray does not dispose all inputs)
+  for (const part of parts) {
+    if (part !== merged) {
+      part.dispose();
+    }
+  }
+
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +317,7 @@ export class TreeRenderer {
   private readonly loadedChunks: Set<string> = new Set();
 
   /** Current InstancedMesh instances (one per variant). */
-  private pineMesh: THREE.InstancedMesh | null = null;
-  private oakMesh: THREE.InstancedMesh | null = null;
-  private oliveMesh: THREE.InstancedMesh | null = null;
+  private variantMeshes: Array<THREE.InstancedMesh | null> = new Array(VARIANT_COUNT).fill(null);
 
   /** Maximum visible tree instances (across all variants). */
   private maxInstances: number = DEFAULT_MAX_INSTANCES;
@@ -278,13 +332,13 @@ export class TreeRenderer {
 
   /** Pre-allocated objects to avoid per-frame GC. */
   private readonly tmpMatrix: THREE.Matrix4 = new THREE.Matrix4();
-  private readonly tmpPosition: THREE.Vector3 = new THREE.Vector3();
+  private readonly tmpScale: THREE.Vector3 = new THREE.Vector3();
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
   }
 
-  // ── Public API ──────────────────────────────────────────────────
+  // -- Public API ----------------------------------------------------------
 
   /**
    * Extract tree positions from chunk tile data and store internally.
@@ -342,19 +396,32 @@ export class TreeRenderer {
         const worldZ = tileY - halfMap + jitterZ;
         const worldY = height;
 
-        // Variant selection: olive biome always gets olive trees,
-        // otherwise deterministic choice between pine and oak
+        // World Y (tileY) as latitude proxy for regional variant selection
+        // Low tileY = north (Europe), High tileY = south (Africa/Egypt)
+        const wy = tileY;
+        const latFactor = wy / 2048; // 0=north, 1=south
+        const regionHash = tileHash(tileX * 5, tileY * 11);
+
         let variant: TreeVariant;
         if (isOlive) {
           variant = TreeVariant.OLIVE;
+        } else if (height > 55) {
+          // Mountain forests get cedar
+          variant = TreeVariant.CEDAR;
+        } else if (latFactor > 0.65) {
+          // Southern regions: date palms
+          variant = TreeVariant.DATE_PALM;
+        } else if (latFactor > 0.4) {
+          // Mediterranean core: cypress, umbrella pine, standard pine
+          if (regionHash < 0.3) variant = TreeVariant.CYPRESS;
+          else if (regionHash < 0.55) variant = TreeVariant.UMBRELLA_PINE;
+          else variant = TreeVariant.MEDITERRANEAN_PINE;
         } else {
-          const variantHash = tileHash(tileX * 3, tileY * 7);
-          variant = variantHash < 0.5
-            ? TreeVariant.MEDITERRANEAN_PINE
-            : TreeVariant.OAK;
+          // Northern regions: oak, pine
+          variant = regionHash < 0.4 ? TreeVariant.OAK : TreeVariant.MEDITERRANEAN_PINE;
         }
 
-        this.allTrees.push({ worldX, worldY, worldZ, variant });
+        this.allTrees.push({ worldX, worldY, worldZ, tileX, tileY, variant });
       }
     }
 
@@ -407,15 +474,19 @@ export class TreeRenderer {
   dispose(): void {
     this.disposeMeshes();
     // Dispose singleton geometries
-    if (pineGeometry) { pineGeometry.dispose(); pineGeometry = null; }
-    if (oakGeometry) { oakGeometry.dispose(); oakGeometry = null; }
-    if (oliveGeometry) { oliveGeometry.dispose(); oliveGeometry = null; }
+    for (let i = 0; i < VARIANT_COUNT; i++) {
+      const geom = variantGeometries[i];
+      if (geom) {
+        geom.dispose();
+        variantGeometries[i] = null;
+      }
+    }
   }
 
-  // ── Internal ──────────────────────────────────────────────────
+  // -- Internal ------------------------------------------------------------
 
   /**
-   * Rebuild all three InstancedMesh objects from the tree pool,
+   * Rebuild all InstancedMesh objects from the tree pool,
    * filtered by distance to camera and capped at maxInstances.
    */
   private rebuildInstances(
@@ -451,125 +522,86 @@ export class TreeRenderer {
       : candidates;
 
     // Count per variant
-    let pineCount = 0;
-    let oakCount = 0;
-    let oliveCount = 0;
+    const variantCounts = new Uint32Array(VARIANT_COUNT);
 
     for (let i = 0; i < visible.length; i++) {
       const entry = visible[i];
       if (!entry) continue;
-      switch (entry.tree.variant) {
-        case TreeVariant.MEDITERRANEAN_PINE: pineCount++; break;
-        case TreeVariant.OAK: oakCount++; break;
-        case TreeVariant.OLIVE: oliveCount++; break;
-      }
+      variantCounts[entry.tree.variant] = (variantCounts[entry.tree.variant] ?? 0) + 1;
     }
 
     // Dispose old meshes
     this.disposeMeshes();
 
     // Create new InstancedMesh per variant (only if count > 0)
-    if (pineCount > 0) {
-      this.pineMesh = new THREE.InstancedMesh(
-        getPineGeometry(),
-        TREE_MATERIAL,
-        pineCount,
-      );
-      this.pineMesh.frustumCulled = false;
-      this.scene.add(this.pineMesh);
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const count = variantCounts[v]!;
+      if (count > 0) {
+        const mesh = new THREE.InstancedMesh(
+          getVariantGeometry(v as TreeVariant),
+          TREE_MATERIAL,
+          count,
+        );
+        mesh.frustumCulled = false;
+        this.scene.add(mesh);
+        this.variantMeshes[v] = mesh;
+      }
     }
 
-    if (oakCount > 0) {
-      this.oakMesh = new THREE.InstancedMesh(
-        getOakGeometry(),
-        TREE_MATERIAL,
-        oakCount,
-      );
-      this.oakMesh.frustumCulled = false;
-      this.scene.add(this.oakMesh);
-    }
-
-    if (oliveCount > 0) {
-      this.oliveMesh = new THREE.InstancedMesh(
-        getOliveGeometry(),
-        TREE_MATERIAL,
-        oliveCount,
-      );
-      this.oliveMesh.frustumCulled = false;
-      this.scene.add(this.oliveMesh);
-    }
-
-    // Fill instance matrices
-    let pineIdx = 0;
-    let oakIdx = 0;
-    let oliveIdx = 0;
+    // Fill instance matrices with per-instance scale variation
+    const variantIndices = new Uint32Array(VARIANT_COUNT);
 
     for (let i = 0; i < visible.length; i++) {
       const entry = visible[i];
       if (!entry) continue;
 
       const { tree } = entry;
-      this.tmpPosition.set(tree.worldX, tree.worldY, tree.worldZ);
-      this.tmpMatrix.makeTranslation(this.tmpPosition.x, this.tmpPosition.y, this.tmpPosition.z);
+      const mesh = this.variantMeshes[tree.variant];
+      if (!mesh) continue;
 
-      switch (tree.variant) {
-        case TreeVariant.MEDITERRANEAN_PINE:
-          if (this.pineMesh) {
-            this.pineMesh.setMatrixAt(pineIdx, this.tmpMatrix);
-            pineIdx++;
-          }
-          break;
-        case TreeVariant.OAK:
-          if (this.oakMesh) {
-            this.oakMesh.setMatrixAt(oakIdx, this.tmpMatrix);
-            oakIdx++;
-          }
-          break;
-        case TreeVariant.OLIVE:
-          if (this.oliveMesh) {
-            this.oliveMesh.setMatrixAt(oliveIdx, this.tmpMatrix);
-            oliveIdx++;
-          }
-          break;
-      }
+      // Per-instance scale variation: 0.8 - 1.2x based on tile hash
+      const scaleFactor = 0.8 + tileHash(Math.floor(tree.worldX * 7), Math.floor(tree.worldZ * 13)) * 0.4;
+
+      this.tmpMatrix.makeTranslation(tree.worldX, tree.worldY, tree.worldZ);
+      this.tmpMatrix.scale(this.tmpScale.set(scaleFactor, scaleFactor, scaleFactor));
+
+      const idx = variantIndices[tree.variant]!;
+      mesh.setMatrixAt(idx, this.tmpMatrix);
+      variantIndices[tree.variant] = (variantIndices[tree.variant] ?? 0) + 1;
     }
 
     // Flag instance matrix buffers for upload
-    if (this.pineMesh) this.pineMesh.instanceMatrix.needsUpdate = true;
-    if (this.oakMesh) this.oakMesh.instanceMatrix.needsUpdate = true;
-    if (this.oliveMesh) this.oliveMesh.instanceMatrix.needsUpdate = true;
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const mesh = this.variantMeshes[v];
+      if (mesh) mesh.instanceMatrix.needsUpdate = true;
+    }
   }
 
   /** Remove all InstancedMesh objects from the scene and release GPU resources. */
   private disposeMeshes(): void {
-    if (this.pineMesh) {
-      this.scene.remove(this.pineMesh);
-      this.pineMesh.dispose();
-      this.pineMesh = null;
-    }
-    if (this.oakMesh) {
-      this.scene.remove(this.oakMesh);
-      this.oakMesh.dispose();
-      this.oakMesh = null;
-    }
-    if (this.oliveMesh) {
-      this.scene.remove(this.oliveMesh);
-      this.oliveMesh.dispose();
-      this.oliveMesh = null;
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const mesh = this.variantMeshes[v];
+      if (mesh) {
+        this.scene.remove(mesh);
+        mesh.dispose();
+        this.variantMeshes[v] = null;
+      }
     }
   }
 
   /** Hide all tree meshes (camera too high). */
   private hideAll(): void {
-    if (this.pineMesh) this.pineMesh.visible = false;
-    if (this.oakMesh) this.oakMesh.visible = false;
-    if (this.oliveMesh) this.oliveMesh.visible = false;
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const mesh = this.variantMeshes[v];
+      if (mesh) mesh.visible = false;
+    }
   }
 
   /** Show all tree meshes. */
   private showAll(): void {
-    if (this.pineMesh) this.pineMesh.visible = true;
-    if (this.oakMesh) this.oakMesh.visible = true;
-    if (this.oliveMesh) this.oliveMesh.visible = true;
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const mesh = this.variantMeshes[v];
+      if (mesh) mesh.visible = true;
+    }
   }
 }

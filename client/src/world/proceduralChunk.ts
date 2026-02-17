@@ -1,16 +1,19 @@
 /**
- * Temporary procedural chunk generator for visual development.
+ * Chunk generator with heightmap support.
  *
- * Generates Mediterranean-style terrain using layered sine/cosine noise.
- * Seamless tiling is guaranteed because all noise functions operate on
- * absolute world coordinates (cx * CHUNK_SIZE + localX).
+ * When a real heightmap PNG is loaded (via heightmapLoader.ts), terrain
+ * heights and province IDs are sampled from it. Otherwise falls back to
+ * the original layered sine/cosine noise.
  *
- * This file will be retired once the real Supabase data pipeline is live.
+ * Biome assignment uses latitude (world Y) and moisture noise for
+ * regionally-appropriate vegetation: northern forests, Mediterranean
+ * scrub/olive/vineyard, southern desert/sand.
  */
 
 import { CHUNK_SIZE, WATER_LEVEL, MAX_HEIGHT, GRID_SIZE } from '../config';
 import { BiomeType, TileFlags } from '../types';
 import type { ChunkData } from '../types';
+import { sampleHeight, sampleProvince, hasHeightmap, hasProvinceMap } from './heightmapLoader';
 
 // ── Noise Helpers ──────────────────────────────────────────────────
 
@@ -22,35 +25,26 @@ function hash2d(x: number, y: number): number {
 
 /**
  * Layered sinusoidal noise producing smooth, tileable terrain.
- * Multiple octaves at different frequencies create natural-looking hills.
+ * Used as fallback when heightmap is not loaded.
  */
 function terrainNoise(wx: number, wy: number): number {
-  // Large-scale continental shape
   const continental =
     Math.sin(wx * 0.0025 + 0.3) * Math.cos(wy * 0.0030 + 0.7) * 0.35 +
     Math.cos(wx * 0.0018 - 0.5) * Math.sin(wy * 0.0022 + 1.2) * 0.25;
-
-  // Medium hills
   const hills =
     Math.sin(wx * 0.012 + wy * 0.008) * 0.15 +
     Math.cos(wx * 0.009 - wy * 0.011 + 2.0) * 0.10;
-
-  // Fine ridges
   const ridges =
     Math.sin(wx * 0.035 + 1.7) * Math.cos(wy * 0.028 + 0.9) * 0.08 +
     Math.sin(wx * 0.022 + wy * 0.044 - 1.3) * 0.05;
-
-  // Very fine variation
   const detail =
     Math.sin(wx * 0.07 + wy * 0.05) * 0.03 +
     Math.cos(wx * 0.09 - wy * 0.06 + 3.1) * 0.02;
-
   return continental + hills + ridges + detail;
 }
 
 /**
- * Additional moisture-like noise used for biome variation.
- * Offset frequencies ensure it is independent from heightmap.
+ * Moisture noise for biome variation.
  */
 function moistureNoise(wx: number, wy: number): number {
   return (
@@ -60,7 +54,7 @@ function moistureNoise(wx: number, wy: number): number {
   );
 }
 
-// ── Voronoi Province Seeds ─────────────────────────────────────────
+// ── Voronoi Province Seeds (fallback) ────────────────────────────────
 
 interface ProvinceSeed {
   wx: number;
@@ -70,25 +64,18 @@ interface ProvinceSeed {
 
 const TOTAL_TILES = GRID_SIZE * CHUNK_SIZE; // 2048
 
-/**
- * Pre-computed province seed points spread across the map.
- * 41 provinces + province 0 (barbarian) at corners.
- */
 const PROVINCE_SEEDS: ProvinceSeed[] = (() => {
   const seeds: ProvinceSeed[] = [];
-  // Province 0: barbarian territory at map corners
   seeds.push({ wx: 0, wy: 0, id: 0 });
   seeds.push({ wx: TOTAL_TILES, wy: 0, id: 0 });
   seeds.push({ wx: 0, wy: TOTAL_TILES, id: 0 });
   seeds.push({ wx: TOTAL_TILES, wy: TOTAL_TILES, id: 0 });
 
-  // Provinces 1-41: distributed across the map interior
   const cols = 7;
   const rows = 6;
   let provinceId = 1;
   for (let row = 0; row < rows && provinceId <= 41; row++) {
     for (let col = 0; col < cols && provinceId <= 41; col++) {
-      // Jitter the grid position deterministically
       const baseX = ((col + 0.5) / cols) * TOTAL_TILES;
       const baseY = ((row + 0.5) / rows) * TOTAL_TILES;
       const jitterX = (hash2d(col * 17 + 3, row * 31 + 7) - 0.5) * (TOTAL_TILES / cols) * 0.5;
@@ -104,7 +91,6 @@ const PROVINCE_SEEDS: ProvinceSeed[] = (() => {
   return seeds;
 })();
 
-/** Find nearest province seed for a world coordinate. */
 function nearestProvince(wx: number, wy: number): number {
   let bestDist = Infinity;
   let bestId = 0;
@@ -123,16 +109,10 @@ function nearestProvince(wx: number, wy: number): number {
 
 // ── Road Path Detection ────────────────────────────────────────────
 
-/**
- * Checks whether a world coordinate lies on a procedural road path.
- * Roads follow diagonal and cardinal lines between province centres.
- * Width tolerance is 1.5 tiles (produces ~3-tile-wide roads).
- */
 function isOnRoad(wx: number, wy: number): boolean {
   const roadWidth = 1.8;
   const roadWidthSq = roadWidth * roadWidth;
 
-  // Check distance to line segments between adjacent province seeds
   for (let i = 4; i < PROVINCE_SEEDS.length; i++) {
     const a = PROVINCE_SEEDS[i]!;
     for (let j = i + 1; j < PROVINCE_SEEDS.length; j++) {
@@ -140,11 +120,8 @@ function isOnRoad(wx: number, wy: number): boolean {
       const abDx = b.wx - a.wx;
       const abDy = b.wy - a.wy;
       const segLenSq = abDx * abDx + abDy * abDy;
-
-      // Only connect seeds that are reasonably close (within ~600 tiles)
       if (segLenSq > 360000) continue;
 
-      // Project point onto segment
       const t = Math.max(0, Math.min(1, ((wx - a.wx) * abDx + (wy - a.wy) * abDy) / segLenSq));
       const projX = a.wx + t * abDx;
       const projY = a.wy + t * abDy;
@@ -162,39 +139,53 @@ function isOnRoad(wx: number, wy: number): boolean {
 
 /**
  * Compute terrain height at a world coordinate.
- *
- * The map is shaped so that:
- *  - Edges (especially south and west) are ocean.
- *  - Centre-north has mountain ranges.
- *  - The interior is rolling Mediterranean hills.
+ * Uses heightmap PNG if loaded, otherwise falls back to procedural noise.
  */
 function computeHeight(wx: number, wy: number): number {
-  const nx = wx / TOTAL_TILES; // 0..1
-  const ny = wy / TOTAL_TILES;
+  // Try heightmap first
+  if (hasHeightmap()) {
+    const h = sampleHeight(wx, wy);
+    if (h !== null) return h;
+  }
 
-  // Base noise value in roughly [-1, 1]
+  // Procedural fallback
+  const nx = wx / TOTAL_TILES;
+  const ny = wy / TOTAL_TILES;
   const noise = terrainNoise(wx, wy);
 
-  // Continental mask: falloff near edges to create ocean borders
-  const edgeFadeX = Math.min(nx, 1 - nx) * 4; // ramp 0->1 over 25% of map
+  const edgeFadeX = Math.min(nx, 1 - nx) * 4;
   const edgeFadeY = Math.min(ny, 1 - ny) * 4;
   const edgeFade = Math.min(1, Math.min(edgeFadeX, edgeFadeY));
 
-  // Mountain ridge in upper-centre portion of the map (Alps / Anatolian highlands)
   const mountainBandY = 1 - Math.pow((ny - 0.3) * 3.5, 2);
   const mountainBandX = 1 - Math.pow((nx - 0.5) * 2.5, 2);
   const mountainFactor = Math.max(0, mountainBandY * mountainBandX);
   const mountainBoost = mountainFactor * 0.35;
 
-  // Combine: scale noise into height range
   const raw = (noise + mountainBoost + 0.4) * edgeFade;
   const height = Math.round(raw * MAX_HEIGHT);
-
   return Math.max(0, Math.min(MAX_HEIGHT, height));
+}
+
+/**
+ * Get province ID at a world coordinate.
+ * Uses province PNG if loaded, otherwise falls back to Voronoi.
+ */
+function getProvinceId(wx: number, wy: number): number {
+  if (hasProvinceMap()) {
+    const p = sampleProvince(wx, wy);
+    if (p !== null) return p;
+  }
+  return nearestProvince(wx, wy);
 }
 
 // ── Biome Assignment ───────────────────────────────────────────────
 
+/**
+ * Latitude-aware biome assignment.
+ * wy maps to latitude: low wy = ~55N (north), high wy = ~25N (south).
+ * latFactor: 0 = far north, 1 = far south.
+ */
 function assignBiome(
   height: number,
   wx: number,
@@ -213,11 +204,46 @@ function assignBiome(
     return isCoast ? BiomeType.COAST : BiomeType.SAND;
   }
 
+  // Latitude factor: 0=north (lat55), 1=south (lat25)
+  const latFactor = wy / TOTAL_TILES;
+  const moisture = moistureNoise(wx, wy);
+  const variation = hash2d(wx, wy);
+
+  // Southern desert belt (lat < ~30N, latFactor > 0.83)
+  if (latFactor > 0.83 && height < 50) {
+    if (moisture > 0.2) return BiomeType.SCRUB;
+    if (variation > 0.85) return BiomeType.SCRUB;
+    return BiomeType.DESERT;
+  }
+
+  // Semi-arid transition (lat 30-33N, latFactor 0.73-0.83)
+  if (latFactor > 0.73 && height < 40) {
+    if (moisture > 0.3) return BiomeType.GRASS;
+    if (moisture > 0.0) return BiomeType.SCRUB;
+    if (variation > 0.7) return BiomeType.SAND;
+    return BiomeType.DESERT;
+  }
+
   // Low elevations: grassland, farmland, olive groves, vineyards
   if (height < WATER_LEVEL + 15) {
-    const moisture = moistureNoise(wx, wy);
-    const variation = hash2d(wx, wy);
+    // Mediterranean zone (lat 33-42, latFactor 0.43-0.73)
+    if (latFactor > 0.43 && latFactor < 0.73) {
+      if (moisture > 0.3 && variation < 0.25) return BiomeType.FARMLAND;
+      if (moisture > 0.1 && variation > 0.65) return BiomeType.OLIVE_GROVE;
+      if (moisture < 0.0 && variation > 0.6) return BiomeType.VINEYARD;
+      if (moisture < -0.2) return BiomeType.SCRUB;
+      return BiomeType.GRASS;
+    }
 
+    // Northern zone (lat > 42, latFactor < 0.43): more forest/farmland
+    if (latFactor < 0.43) {
+      if (moisture > 0.2 && variation < 0.3) return BiomeType.FARMLAND;
+      if (moisture > 0.3) return BiomeType.FOREST;
+      if (moisture < -0.2) return BiomeType.SCRUB;
+      return BiomeType.GRASS;
+    }
+
+    // Default for southern lowlands
     if (moisture > 0.3 && variation < 0.25) return BiomeType.FARMLAND;
     if (moisture > 0.1 && variation > 0.7) return BiomeType.OLIVE_GROVE;
     if (moisture < -0.1 && variation > 0.6) return BiomeType.VINEYARD;
@@ -227,7 +253,7 @@ function assignBiome(
 
   // Mid elevations
   if (height < 50) {
-    const moisture = moistureNoise(wx, wy);
+    if (latFactor > 0.73) return BiomeType.SCRUB; // Dry southern hills
     if (moisture > 0.2) return BiomeType.FOREST;
     if (moisture > -0.1) return BiomeType.GRASS;
     return BiomeType.SCRUB;
@@ -235,7 +261,7 @@ function assignBiome(
 
   // Upper-mid elevations
   if (height < 70) {
-    const moisture = moistureNoise(wx, wy);
+    if (latFactor > 0.73) return BiomeType.MOUNTAIN; // Dry mountains
     if (moisture > 0.3) return BiomeType.DENSE_FOREST;
     if (moisture > 0) return BiomeType.FOREST;
     return BiomeType.SCRUB;
@@ -251,11 +277,13 @@ function assignBiome(
 // ── Public API ─────────────────────────────────────────────────────
 
 /**
- * Generate a complete ChunkData object procedurally.
+ * Generate a complete ChunkData object.
+ *
+ * Uses heightmap + province PNG data when available, falling back to
+ * procedural generation.
  *
  * @param cx - Chunk X coordinate (0 .. GRID_SIZE-1)
  * @param cy - Chunk Y coordinate (0 .. GRID_SIZE-1)
- * @returns ChunkData with heights, biomes, flags, and provinces filled in
  */
 export function generateProceduralChunk(cx: number, cy: number): ChunkData {
   const tileCount = CHUNK_SIZE * CHUNK_SIZE;
@@ -265,20 +293,18 @@ export function generateProceduralChunk(cx: number, cy: number): ChunkData {
   const flags = new Uint8Array(tileCount);
   const provinces = new Uint8Array(tileCount);
 
-  // First pass: compute all heights so we can detect coastlines
   const originX = cx * CHUNK_SIZE;
   const originY = cy * CHUNK_SIZE;
 
+  // First pass: compute all heights
   for (let ly = 0; ly < CHUNK_SIZE; ly++) {
     for (let lx = 0; lx < CHUNK_SIZE; lx++) {
       const idx = ly * CHUNK_SIZE + lx;
-      const wx = originX + lx;
-      const wy = originY + ly;
-      heights[idx] = computeHeight(wx, wy);
+      heights[idx] = computeHeight(originX + lx, originY + ly);
     }
   }
 
-  // Second pass: assign biomes, flags, provinces (needs neighbour height info for coast)
+  // Second pass: biomes, flags, provinces
   for (let ly = 0; ly < CHUNK_SIZE; ly++) {
     for (let lx = 0; lx < CHUNK_SIZE; lx++) {
       const idx = ly * CHUNK_SIZE + lx;
@@ -286,19 +312,16 @@ export function generateProceduralChunk(cx: number, cy: number): ChunkData {
       const wy = originY + ly;
       const h = heights[idx]!;
 
-      // Detect coast: land tile adjacent to water
+      // Coast detection
       let isCoast = false;
       if (h >= WATER_LEVEL) {
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1 && !isCoast; dy++) {
+          for (let dx = -1; dx <= 1 && !isCoast; dx++) {
             if (dx === 0 && dy === 0) continue;
             const nlx = lx + dx;
             const nly = ly + dy;
-            // For tiles at chunk edges, compute neighbour height directly
             if (nlx < 0 || nlx >= CHUNK_SIZE || nly < 0 || nly >= CHUNK_SIZE) {
-              const nwx = wx + dx;
-              const nwy = wy + dy;
-              if (computeHeight(nwx, nwy) < WATER_LEVEL) {
+              if (computeHeight(wx + dx, wy + dy) < WATER_LEVEL) {
                 isCoast = true;
               }
             } else {
@@ -307,20 +330,18 @@ export function generateProceduralChunk(cx: number, cy: number): ChunkData {
                 isCoast = true;
               }
             }
-            if (isCoast) break;
           }
-          if (isCoast) break;
         }
       }
 
-      // Biome
+      // Biome (now latitude-aware)
       biomes[idx] = assignBiome(h, wx, wy, isCoast);
 
-      // Province (only for land tiles)
+      // Province
       if (h >= WATER_LEVEL) {
-        provinces[idx] = nearestProvince(wx, wy);
+        provinces[idx] = getProvinceId(wx, wy);
       } else {
-        provinces[idx] = 0; // Water is barbarian/unclaimed
+        provinces[idx] = 0;
       }
 
       // Flags
@@ -330,7 +351,7 @@ export function generateProceduralChunk(cx: number, cy: number): ChunkData {
       }
       if (h >= WATER_LEVEL && isOnRoad(wx, wy)) {
         tileFlag |= TileFlags.HAS_ROAD;
-        biomes[idx] = BiomeType.ROAD; // Override biome on road tiles
+        biomes[idx] = BiomeType.ROAD;
       }
       flags[idx] = tileFlag;
     }

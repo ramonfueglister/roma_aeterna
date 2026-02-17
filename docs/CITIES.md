@@ -326,6 +326,24 @@ The `CityLODSystem` reads the camera distance and writes to `CityDisplay.lodMode
 - Metropolis (Roma): up to 100,000 triangles
 - Village: ~1,000 triangles
 
+### Per-City LOD0 Triangle Budget (Mandatory)
+
+Each city at LOD0 must stay within a triangle cap to prevent frame budget blowout
+on integrated GPUs (Intel UHD 630 target). If greedy meshing output exceeds the cap,
+automatic mesh simplification (edge collapse or quad merge) must reduce triangle count.
+
+| City Tier | Max Triangles (LOD0) | Typical Range | Notes |
+|-----------|---------------------|---------------|-------|
+| Tier 1 (World Wonder / Metropolis) | 100,000 | 50K-100K | Roma, Alexandria, etc. |
+| Tier 2 (Major City) | 60,000 | 20K-60K | 40 cities |
+| Tier 3 (Notable City) | 30,000 | 10K-30K | 60+ cities |
+| Tier 4 (Small / Village) | 10,000 | 1K-10K | 200+ cities (procedural) |
+
+**Simultaneous LOD0 cities in view**: The LRU cache holds max 30 cities at LOD0, but
+typically only 1-3 are visible at detail zoom. If more than 3 LOD0 cities are in the
+frustum simultaneously, the furthest cities must be downgraded to LOD1 to maintain
+the per-frame triangle budget.
+
 ### LOD0 Microdetail Requirements (Mandatory)
 
 - Every LOD0 city must include district-level prop layers:
