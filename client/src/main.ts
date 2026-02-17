@@ -30,6 +30,7 @@ import { loadHeightmaps } from './world/heightmapLoader';
 import {
   world,
   createCameraEntity,
+  createCityEntity,
   setCameraRef,
   setChunkLoaderRef,
   setCityRendererRef,
@@ -37,7 +38,48 @@ import {
   setAgentRendererRef,
   setLabelRendererRef,
   setProvinceRendererRef,
+  Position,
+  CityInfo,
+  Culture,
 } from './ecs';
+import { CITY_DATABASE } from './world/cityDatabase';
+import { MAP_SIZE } from './config';
+import type { CultureType } from './types';
+
+// ── Culture string → ECS enum mapping ────────────────────────────
+
+const CULTURE_MAP: Record<CultureType, number> = {
+  roman: Culture.ROMAN,
+  greek: Culture.GREEK,
+  egyptian: Culture.EGYPTIAN,
+  celtic: Culture.CELTIC,
+  germanic: Culture.GERMANIC,
+  north_african: Culture.NORTH_AFRICAN,
+  eastern: Culture.EASTERN,
+  levantine: Culture.EASTERN,
+  dacian: Culture.CELTIC,
+};
+
+/** Hydrate ECS city entities from the static city database. */
+function hydrateCityEntities(): void {
+  const halfMap = MAP_SIZE / 2;
+  for (const city of CITY_DATABASE) {
+    const eid = createCityEntity(world);
+
+    // World position (centered on map origin)
+    Position.x[eid] = city.tileX - halfMap;
+    Position.y[eid] = 0; // ground level, set by terrain later
+    Position.z[eid] = city.tileY - halfMap;
+
+    // City info
+    CityInfo.tier[eid] = city.tier;
+    CityInfo.culture[eid] = CULTURE_MAP[city.culture] ?? Culture.ROMAN;
+    CityInfo.population[eid] = city.population;
+    CityInfo.provinceNumber[eid] = city.provinceId;
+    CityInfo.isHarbor[eid] = city.isPort ? 1 : 0;
+    CityInfo.isCapital[eid] = city.isCapital ? 1 : 0;
+  }
+}
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 
@@ -78,6 +120,9 @@ async function init(): Promise<void> {
   // Create singleton camera entity and wire Three.js camera ref
   createCameraEntity(world);
   setCameraRef(engine.camera);
+
+  // Hydrate city entities from static database
+  hydrateCityEntities();
 
   // Wire renderer refs so ECS systems can delegate to existing renderers
   const terrainSys = engine.getSystem<TerrainSystem>('terrain');
