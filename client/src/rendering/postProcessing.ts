@@ -64,11 +64,11 @@ export class PostProcessingPipeline {
   // Bloom
   private readonly _bloomStrength = uniform(0.35);
   private readonly _bloomRadius = uniform(0.6);
-  private readonly _bloomThreshold = uniform(0.70);
+  private readonly _bloomThreshold = uniform(0.58);
 
   // Vignette
   private readonly _vignetteIntensity = uniform(0.45);
-  private readonly _vignetteSmoothness = uniform(0.55);
+  private readonly _vignetteSmoothness = uniform(0.65);
 
   // Color Grading
   private readonly _saturation = uniform(0.88);
@@ -245,14 +245,14 @@ export class PostProcessingPipeline {
   /**
    * Parchment overlay: procedural noise blended over the scene
    * using multiply blend for an antique map feel.
-   * Fades in at camera heights above 2000, max opacity 0.15 at 5000+.
+   * Fades in at camera heights above 2000, max opacity 0.25 at 5000+.
    */
   private buildParchmentOverlay(inputColor: Node): Node {
     const cameraHeightU = this._cameraHeight;
 
     const parchmentFn = Fn(([color]: [Node]) => {
-      // Opacity: 0 at height <= 2000, 0.15 at height >= 5000
-      const opacity = smoothstep(float(2000.0), float(5000.0), cameraHeightU).mul(0.15);
+      // Opacity: 0 at height <= 2000, 0.25 at height >= 5000
+      const opacity = smoothstep(float(2000.0), float(5000.0), cameraHeightU).mul(0.25);
 
       // Generate procedural parchment noise using MaterialX FBM
       // Tile at 512px equivalent spacing
@@ -448,7 +448,7 @@ export class PostProcessingPipeline {
    * Also drives zoom-dependent tilt-shift and saturation.
    *
    * - height <= 2000: no parchment effect (opacity 0)
-   * - height >= 5000: full parchment effect (opacity 0.15)
+   * - height >= 5000: full parchment effect (opacity 0.25)
    * - smooth interpolation between these thresholds
    */
   updateCameraHeight(height: number): void {
