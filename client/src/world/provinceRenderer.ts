@@ -1,8 +1,8 @@
 /**
- * Province overlay rendering system.
+ * Province overlay rendering system (TSL / WebGPURenderer).
  *
  * Renders semi-transparent province fills, borders, and labels as a single
- * full-map ShaderMaterial plane. Visibility adapts to camera height:
+ * full-map MeshBasicNodeMaterial plane. Visibility adapts to camera height:
  *
  *   > 3000  (Strategic)  Full fill + borders + names
  *   1000-3000 (Regional) Borders + names, no fill
@@ -12,10 +12,31 @@
  * Province data is accumulated tile-by-tile from chunk loads into a 2048x2048
  * DataTexture (RED channel = province ID). A 42x1 colour lookup texture
  * supplies per-province RGBA. All edge detection and alpha blending is
- * performed in the fragment shader for a single draw call.
+ * performed via TSL nodes for a single draw call.
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import {
+  texture,
+  uniform,
+  uv,
+  float,
+  vec2,
+  vec3,
+  vec4,
+  Fn,
+  min,
+  max,
+  mix,
+  sin,
+  smoothstep,
+  length,
+  clamp,
+  floor,
+  select,
+  Loop,
+} from 'three/tsl';
 import {
   MAP_SIZE,
   CHUNK_SIZE,
@@ -27,13 +48,8 @@ import {
 // Height thresholds for camera-dependent rendering
 // ---------------------------------------------------------------------------
 
-/** Camera height above which full province fill is shown. */
 const STRATEGIC_HEIGHT = 3000;
-/** Camera height above which borders + names are shown (no fill). */
-const REGIONAL_HEIGHT = 1000;
-/** Camera height above which thin border lines are shown. */
 const TACTICAL_HEIGHT = 300;
-/** Smooth blend range (world units) around each threshold. */
 const BLEND_RANGE = 200;
 
 /** Y position of the overlay plane, slightly above terrain / water. */
@@ -48,12 +64,8 @@ function generateProvinceColors(): [number, number, number][] {
     PROVINCE_COUNT + 1,
   );
 
-  // Province 0 = barbarian territory -- invisible (alpha handled in shader)
   colors[0] = [0, 0, 0];
 
-  // Generate 41 distinct warm-palette colours.
-  // Hue distribution across Mediterranean tones: golds, terracottas,
-  // olive greens, warm blues, muted purples, sandy tans.
   const hueAnchors = [
     30, 42, 18, 55, 10, 70, 25, 48, 195, 210, 35, 60, 15, 50, 8, 75,
     225, 280, 320, 38, 22, 45, 12, 65, 200, 240, 310, 28, 52, 20, 58,
@@ -63,7 +75,6 @@ function generateProvinceColors(): [number, number, number][] {
   for (let i = 1; i <= PROVINCE_COUNT; i++) {
     const hueIndex = hueAnchors[(i - 1) % hueAnchors.length];
     const hue = hueIndex !== undefined ? hueIndex : ((i - 1) * 37) % 360;
-    // Vary saturation and lightness to improve distinguishability
     const saturation = 0.45 + ((i * 7) % 30) / 100;
     const lightness = 0.42 + ((i * 13) % 20) / 100;
     const [r, g, b] = hslToRgb(hue / 360, saturation, lightness);
@@ -73,7 +84,6 @@ function generateProvinceColors(): [number, number, number][] {
   return colors;
 }
 
-/** Convert HSL (h in [0,1], s in [0,1], l in [0,1]) to RGB [0,255]. */
 function hslToRgb(
   h: number,
   s: number,
@@ -113,150 +123,6 @@ function hue2rgb(p: number, q: number, t: number): number {
 const PROVINCE_COLORS = generateProvinceColors();
 
 // ---------------------------------------------------------------------------
-// GLSL Shaders
-// ---------------------------------------------------------------------------
-
-const VERTEX_SHADER = /* glsl */ `
-  precision highp float;
-
-  varying vec2 vUv;
-  varying vec3 vWorldPos;
-
-  void main() {
-    vUv = uv;
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vWorldPos = worldPos.xyz;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const FRAGMENT_SHADER = /* glsl */ `
-  precision highp float;
-
-  uniform sampler2D uProvinceMap;    // 2048x2048, RED = province ID (0-255)
-  uniform sampler2D uProvinceColors; // 42x1 RGBA lookup
-  uniform float uCameraHeight;
-  uniform float uBorderWidth;
-  uniform float uFillAlpha;
-  uniform float uTime;
-  uniform float uBorderGlow;
-
-  varying vec2 vUv;
-  varying vec3 vWorldPos;
-
-  // Height thresholds (matching TS constants)
-  const float STRATEGIC  = ${STRATEGIC_HEIGHT.toFixed(1)};
-  const float REGIONAL   = ${REGIONAL_HEIGHT.toFixed(1)};
-  const float TACTICAL   = ${TACTICAL_HEIGHT.toFixed(1)};
-  const float BLEND      = ${BLEND_RANGE.toFixed(1)};
-  const float MAP_SZ     = ${MAP_SIZE.toFixed(1)};
-
-  // Look up province colour from the 42x1 palette texture.
-  // Province IDs are stored as 0-255 in the red channel, so we
-  // normalise to a U coordinate into the palette strip.
-  vec4 getProvinceColor(float id) {
-    float u = (id + 0.5) / 42.0;
-    return texture2D(uProvinceColors, vec2(u, 0.5));
-  }
-
-  // Read province ID at a texel offset from current UV.
-  float sampleId(vec2 baseUv, vec2 offset) {
-    vec2 texelSize = vec2(1.0 / MAP_SZ);
-    vec2 sampleUv = baseUv + offset * texelSize;
-    // Clamp to valid range
-    sampleUv = clamp(sampleUv, vec2(0.0), vec2(1.0));
-    return texture2D(uProvinceMap, sampleUv).r * 255.0;
-  }
-
-  void main() {
-    // ── Province ID at this fragment ────────────────────────────
-    float rawId = texture2D(uProvinceMap, vUv).r * 255.0;
-    float id = floor(rawId + 0.5); // round to nearest integer
-
-    // ── Height-based visibility factors ─────────────────────────
-    // smoothstep transitions with BLEND range around each threshold
-    float fillFactor   = smoothstep(STRATEGIC - BLEND, STRATEGIC + BLEND, uCameraHeight);
-    float borderFactor = smoothstep(TACTICAL,  TACTICAL + BLEND,  uCameraHeight);
-    float fadeFactor   = smoothstep(TACTICAL - BLEND * 0.5, TACTICAL, uCameraHeight);
-
-    // If camera is below tactical threshold, fully transparent
-    if (fadeFactor < 0.001) {
-      discard;
-    }
-
-    // ── Border detection (multi-sample distance field) ──────────
-    // Sample 8 neighbors at varying distances for smooth border detection
-    float borderDist = 999.0;
-    for (int i = -2; i <= 2; i++) {
-      for (int j = -2; j <= 2; j++) {
-        if (i == 0 && j == 0) continue;
-        float nId = floor(sampleId(vUv, vec2(float(i), float(j)) * uBorderWidth * 0.5) + 0.5);
-        if (nId != id) {
-          float d = length(vec2(float(i), float(j)));
-          borderDist = min(borderDist, d);
-        }
-      }
-    }
-
-    // Distance-based border alpha with soft gradient falloff
-    float borderAlpha = 1.0 - smoothstep(0.0, 3.0, borderDist);
-
-    // ── Province colour lookup ──────────────────────────────────
-    vec4 provColor = getProvinceColor(id);
-
-    // ── Barbarian territory (ID 0) ──────────────────────────────
-    // Very subtle dark overlay for barbarian land, no fill/border
-    if (id < 0.5) {
-      // Only show at strategic height and only as subtle darkening
-      float barbAlpha = 0.08 * fillFactor * fadeFactor;
-      if (barbAlpha < 0.001) {
-        discard;
-      }
-      gl_FragColor = vec4(0.0, 0.0, 0.0, barbAlpha);
-      return;
-    }
-
-    // ── Compose final colour ────────────────────────────────────
-    vec3 fillColor = provColor.rgb;
-
-    // Glow border color: 1.5x province color for bloom pickup
-    vec3 borderColor = provColor.rgb * 1.5;
-    // Add subtle emissive warm glow scaled by glow intensity
-    borderColor += vec3(0.15, 0.1, 0.05) * borderAlpha * uBorderGlow;
-
-    float alpha = 0.0;
-    vec3 color  = vec3(0.0);
-
-    if (borderAlpha > 0.01) {
-      // Borders visible from tactical height upward
-      // Thicker appearance at higher altitudes, thin at tactical
-      float heightBorderAlpha = mix(0.5, 0.85, fillFactor);
-      // Subtle pulse animation on border brightness
-      float pulse = 0.9 + 0.1 * sin(uTime * 1.2);
-      float finalBorderAlpha = borderAlpha * heightBorderAlpha * borderFactor * pulse;
-
-      // Blend fill behind the border gradient
-      float fillAlphaHere = uFillAlpha * fillFactor;
-      color = mix(fillColor, borderColor, borderAlpha);
-      alpha = max(finalBorderAlpha, fillAlphaHere);
-    } else {
-      // Fill only at strategic height
-      color = fillColor;
-      alpha = uFillAlpha * fillFactor;
-    }
-
-    // Apply overall fade factor (smooth in/out at tactical boundary)
-    alpha *= fadeFactor;
-
-    if (alpha < 0.001) {
-      discard;
-    }
-
-    gl_FragColor = vec4(color, alpha);
-  }
-`;
-
-// ---------------------------------------------------------------------------
 // ProvinceRenderer
 // ---------------------------------------------------------------------------
 
@@ -265,9 +131,16 @@ export class ProvinceRenderer {
   private readonly provinceGrid: Uint8Array;
   private readonly provinceTexture: THREE.DataTexture;
   private readonly colorTexture: THREE.DataTexture;
-  private readonly material: THREE.ShaderMaterial;
+  private readonly material: InstanceType<typeof MeshBasicNodeMaterial>;
   private readonly geometry: THREE.PlaneGeometry;
   private readonly mesh: THREE.Mesh;
+
+  // TSL uniforms
+  private readonly _uCameraHeight = uniform(0.0);
+  private readonly _uBorderWidth = uniform(2.0);
+  private readonly _uFillAlpha = uniform(0.30);
+  private readonly _uTime = uniform(0.0);
+  private readonly _uBorderGlow = uniform(1.0);
 
   private needsTextureUpload = false;
   private userVisible = true;
@@ -293,7 +166,7 @@ export class ProvinceRenderer {
     this.provinceTexture.needsUpdate = true;
 
     // ── Province colour lookup texture (42x1, RGBA) ─────────────
-    const colorCount = PROVINCE_COUNT + 1; // 0..41 inclusive
+    const colorCount = PROVINCE_COUNT + 1;
     const colorData = new Uint8Array(colorCount * 4);
     for (let i = 0; i < colorCount; i++) {
       const entry = PROVINCE_COLORS[i];
@@ -317,23 +190,127 @@ export class ProvinceRenderer {
     this.colorTexture.wrapT = THREE.ClampToEdgeWrapping;
     this.colorTexture.needsUpdate = true;
 
-    // ── ShaderMaterial ──────────────────────────────────────────
-    this.material = new THREE.ShaderMaterial({
-      vertexShader: VERTEX_SHADER,
-      fragmentShader: FRAGMENT_SHADER,
+    // ── TSL Node Material ───────────────────────────────────────
+    this.material = new MeshBasicNodeMaterial({
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
-      uniforms: {
-        uProvinceMap:    { value: this.provinceTexture },
-        uProvinceColors: { value: this.colorTexture },
-        uCameraHeight:   { value: 0.0 },
-        uBorderWidth:    { value: 2.0 },
-        uFillAlpha:      { value: 0.30 },
-        uTime:           { value: 0.0 },
-        uBorderGlow:     { value: 1.0 },
-      },
     });
+
+    // TSL texture nodes
+    const tProvMap = texture(this.provinceTexture);
+    const tProvColors = texture(this.colorTexture);
+
+    const uCamH = this._uCameraHeight;
+    const uBorderW = this._uBorderWidth;
+    const uFillA = this._uFillAlpha;
+    const uTime = this._uTime;
+    const uGlow = this._uBorderGlow;
+
+    // Build the fragment output as a TSL Fn
+    const provinceFn = Fn(() => {
+      const baseUv = uv();
+      const texelSize = float(1.0 / MAP_SIZE);
+
+      // ── Province ID at this fragment
+      const rawId = tProvMap.uv(baseUv).r.mul(255.0);
+      const id = floor(rawId.add(0.5));
+
+      // ── Height-based visibility factors
+      const fillFactor = smoothstep(
+        float(STRATEGIC_HEIGHT - BLEND_RANGE),
+        float(STRATEGIC_HEIGHT + BLEND_RANGE),
+        uCamH,
+      );
+      const borderFactor = smoothstep(
+        float(TACTICAL_HEIGHT),
+        float(TACTICAL_HEIGHT + BLEND_RANGE),
+        uCamH,
+      );
+      const fadeFactor = smoothstep(
+        float(TACTICAL_HEIGHT - BLEND_RANGE * 0.5),
+        float(TACTICAL_HEIGHT),
+        uCamH,
+      );
+
+      // ── Border detection (5x5 neighbor sampling)
+      // Sample neighbors to find nearest province boundary
+      const borderDist = float(999.0).toVar();
+
+      // Unrolled 5x5 loop (TSL Loop requires integer range)
+      // We sample at offsets [-2, -1, 0, 1, 2] × [-2, -1, 0, 1, 2]
+      // skipping (0,0), scaled by borderWidth * 0.5
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      Loop(5, ({ i: ii }: any) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        Loop(5, ({ i: jj }: any) => {
+          const fi = ii.toFloat().sub(2.0);
+          const fj = jj.toFloat().sub(2.0);
+          const isCenter = fi.equal(0.0).and(fj.equal(0.0));
+
+          const offsetUv = baseUv.add(
+            vec2(fi, fj).mul(uBorderW).mul(0.5).mul(texelSize),
+          );
+          const clampedUv = clamp(offsetUv, vec2(0.0), vec2(1.0));
+          const nRaw = tProvMap.uv(clampedUv).r.mul(255.0);
+          const nId = floor(nRaw.add(0.5));
+
+          const isDiff = nId.notEqual(id);
+          const d = length(vec2(fi, fj));
+
+          // Update minimum border distance (skip center, skip same province)
+          borderDist.assign(
+            select(isCenter, borderDist,
+              select(isDiff, min(borderDist, d), borderDist),
+            ),
+          );
+        });
+      });
+
+      const borderAlpha = float(1.0).sub(smoothstep(float(0.0), float(3.0), borderDist));
+
+      // ── Province colour lookup
+      const colorU = id.add(0.5).div(42.0);
+      const provColor = tProvColors.uv(vec2(colorU, 0.5));
+
+      // ── Compose output
+      const fillColor = provColor.rgb;
+      const borderColor = provColor.rgb.mul(1.5).add(
+        vec3(0.15, 0.1, 0.05).mul(borderAlpha).mul(uGlow),
+      );
+
+      // Border pulse animation
+      const pulse = float(0.9).add(float(0.1).mul(sin(uTime.mul(1.2))));
+
+      // Height-dependent border alpha
+      const heightBorderAlpha = mix(float(0.5), float(0.85), fillFactor);
+      const finalBorderAlpha = borderAlpha.mul(heightBorderAlpha).mul(borderFactor).mul(pulse);
+      const fillAlphaHere = uFillA.mul(fillFactor);
+
+      // Blend fill and border
+      const hasBorder = borderAlpha.greaterThan(0.01);
+      const color = select(hasBorder,
+        mix(fillColor, borderColor, borderAlpha),
+        fillColor,
+      );
+      const alpha = select(hasBorder,
+        max(finalBorderAlpha, fillAlphaHere),
+        fillAlphaHere,
+      ).mul(fadeFactor);
+
+      // Barbarian territory: subtle dark overlay
+      const isBarbarian = id.lessThan(0.5);
+      const barbAlpha = float(0.08).mul(fillFactor).mul(fadeFactor);
+
+      const finalColor = select(isBarbarian, vec3(0.0), color);
+      const finalAlpha = select(isBarbarian, barbAlpha, alpha);
+
+      return vec4(finalColor, finalAlpha);
+    });
+
+    const output = provinceFn();
+    this.material.colorNode = output.rgb;
+    this.material.opacityNode = output.a;
 
     // ── Geometry (XZ plane spanning the full map) ───────────────
     this.geometry = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE, 1, 1);
@@ -349,10 +326,6 @@ export class ProvinceRenderer {
 
   // ── Public API ──────────────────────────────────────────────────
 
-  /**
-   * Populate a 32x32 region of the province grid from chunk data.
-   * Call this as each chunk's province data becomes available.
-   */
   updateChunkProvinces(cx: number, cy: number, provinces: Uint8Array): void {
     const startX = cx * CHUNK_SIZE;
     const startY = cy * CHUNK_SIZE;
@@ -362,7 +335,6 @@ export class ProvinceRenderer {
         const worldX = startX + lx;
         const worldY = startY + ly;
 
-        // Bounds check
         if (worldX < 0 || worldX >= MAP_SIZE || worldY < 0 || worldY >= MAP_SIZE) {
           continue;
         }
@@ -379,44 +351,23 @@ export class ProvinceRenderer {
     this.needsTextureUpload = true;
   }
 
-  /**
-   * Per-frame update. Sets camera-height uniform and uploads dirty texture.
-   */
   update(cameraHeight: number, elapsed = 0): void {
-    // Upload texture if chunk data changed since last frame
     if (this.needsTextureUpload) {
       this.provinceTexture.needsUpdate = true;
       this.needsTextureUpload = false;
     }
 
-    // Update camera height uniform
-    const uCameraHeight = this.material.uniforms['uCameraHeight'];
-    if (uCameraHeight) {
-      uCameraHeight.value = cameraHeight;
-    }
+    this._uCameraHeight.value = cameraHeight;
+    this._uTime.value = elapsed;
 
-    // Update time uniform for border pulse animation
-    const uTime = this.material.uniforms['uTime'];
-    if (uTime) {
-      uTime.value = elapsed;
-    }
-
-    // Hide mesh entirely when below lowest threshold (performance) or user-toggled off
     this.mesh.visible = this.userVisible && cameraHeight >= TACTICAL_HEIGHT - BLEND_RANGE;
   }
 
-  /**
-   * Toggle user-controlled visibility of the province overlay.
-   * When hidden by the user, the overlay stays hidden regardless of camera height.
-   */
   toggleVisible(): void {
     this.userVisible = !this.userVisible;
     this.mesh.visible = this.userVisible && this.mesh.visible;
   }
 
-  /**
-   * Dispose all GPU resources. Call when the province renderer is no longer needed.
-   */
   dispose(): void {
     this.scene.remove(this.mesh);
     this.geometry.dispose();
