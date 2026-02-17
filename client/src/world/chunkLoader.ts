@@ -22,6 +22,7 @@ import { generateProceduralChunk } from './proceduralChunk';
 import { greedyMeshChunk } from './greedyMesher';
 import { getCachedMesh, putCachedMesh, hashChunkData } from './meshCache';
 import { WorkerPool } from '../workers/workerPool';
+import { registerBatchedMesh, unregisterBatchedMesh } from '../ecs/meshRegistry';
 
 const log = createLogger('ChunkLoader');
 
@@ -38,6 +39,17 @@ interface LoadedChunkEntry {
  * Returns null if the chunk is unavailable.
  */
 export type ChunkDataProvider = (cx: number, cy: number) => ChunkData | null;
+
+/**
+ * Callback fired when a chunk mesh is added to a BatchedMesh.
+ * Provides the data needed to populate ECS MeshRef components.
+ */
+export type OnChunkMeshReady = (
+  cx: number, cy: number, lod: LODLevel, geometryId: number, instanceId: number,
+) => void;
+
+/** Callback fired when a chunk is removed from a BatchedMesh. */
+export type OnChunkUnloaded = (cx: number, cy: number) => void;
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -122,12 +134,35 @@ export class ChunkLoader {
   /** Worker pool for off-thread mesh generation. */
   private workerPool: WorkerPool | null;
 
-  /** Last camera chunk position. */
+  /** Last camera chunk position and view range for change detection. */
   private lastCameraCx = -9999;
   private lastCameraCy = -9999;
+  private lastViewRange = -1;
+
+  /** ECS callback: fired when a chunk mesh is ready (load or LOD swap). */
+  onChunkMeshReady: OnChunkMeshReady | null = null;
+
+  /** ECS callback: fired when a chunk is unloaded. */
+  onChunkUnloaded: OnChunkUnloaded | null = null;
 
   /** Reusable matrix for positioning instances. */
   private readonly tmpMatrix = new THREE.Matrix4();
+
+  /**
+   * Reusable RGBA helper for per-instance alpha.
+   * BatchedMesh.setColorAt calls color.toArray(data, offset).
+   * THREE.Color writes 3 components (RGB); this helper writes 4 (RGBA).
+   */
+  private readonly tmpColorRGBA = {
+    r: 1, g: 1, b: 1, a: 1,
+    toArray(array: number[] | Float32Array, offset: number) {
+      array[offset] = this.r;
+      array[offset + 1] = this.g;
+      array[offset + 2] = this.b;
+      array[offset + 3] = this.a;
+      return array;
+    },
+  };
 
   constructor(
     scene: THREE.Scene,
@@ -186,11 +221,26 @@ export class ChunkLoader {
     bm.renderOrder = lod;
     this.batchedMeshes.set(lod, bm);
     this.terrainGroup.add(bm);
+
+    // Register in ECS MeshRegistry so systems can look up by batchId (= LOD level)
+    registerBatchedMesh(lod, bm);
   }
 
   // ── Public API ─────────────────────────────────────────────────
 
-  update(cameraWorldX: number, cameraWorldZ: number): void {
+  /**
+   * @param cameraWorldX World-space X of camera
+   * @param cameraWorldZ World-space Z of camera
+   * @param viewRange    View range in chunk units from viewportSystem.
+   *                     When provided, overrides loadRadius/unloadRadius dynamically.
+   */
+  update(cameraWorldX: number, cameraWorldZ: number, viewRange?: number): void {
+    // Dynamically adapt load/unload radii from viewport when provided
+    if (viewRange !== undefined) {
+      this.loadRadius = viewRange;
+      this.unloadRadius = viewRange + 4; // hysteresis buffer prevents thrashing
+    }
+
     const tileX = cameraWorldX + MAP_SIZE / 2;
     const tileZ = cameraWorldZ + MAP_SIZE / 2;
     const { cx: cameraCx, cy: cameraCy } = worldToChunk(tileX, tileZ);
@@ -198,11 +248,16 @@ export class ChunkLoader {
     // Always run alpha blending for smooth transitions (lerp-based)
     this.updateLODAlpha(cameraCx, cameraCy);
 
-    if (cameraCx === this.lastCameraCx && cameraCy === this.lastCameraCy) {
+    if (
+      cameraCx === this.lastCameraCx &&
+      cameraCy === this.lastCameraCy &&
+      this.loadRadius === this.lastViewRange
+    ) {
       return;
     }
     this.lastCameraCx = cameraCx;
     this.lastCameraCy = cameraCy;
+    this.lastViewRange = this.loadRadius;
 
     this.loadNearbyChunks(cameraCx, cameraCy);
     this.unloadDistantChunks(cameraCx, cameraCy);
@@ -233,7 +288,8 @@ export class ChunkLoader {
     this.loadedChunks.clear();
     this.pendingLoads.clear();
 
-    for (const bm of this.batchedMeshes.values()) {
+    for (const [lod, bm] of this.batchedMeshes) {
+      unregisterBatchedMesh(lod);
       bm.dispose();
     }
     this.batchedMeshes.clear();
@@ -356,6 +412,7 @@ export class ChunkLoader {
     }
 
     this.loadedChunks.set(key, entry);
+    this.onChunkMeshReady?.(cx, cy, lod, entry.geometryId, entry.instanceId);
     gameEvents.emit('chunk_loaded', { cx, cy });
   }
 
@@ -389,6 +446,7 @@ export class ChunkLoader {
     this.loadedChunks.delete(key);
     this.pendingLoads.delete(key);
 
+    this.onChunkUnloaded?.(coords.cx, coords.cy);
     gameEvents.emit('chunk_unloaded', { cx: coords.cx, cy: coords.cy });
   }
 
@@ -474,18 +532,16 @@ export class ChunkLoader {
     entry.geometryId = newEntry.geometryId;
     entry.instanceId = newEntry.instanceId;
 
+    this.onChunkMeshReady?.(cx, cy, newLod, newEntry.geometryId, newEntry.instanceId);
     gameEvents.emit('lod_changed', { cx, cy, lod: newLod });
   }
 
   /**
-   * Update per-LOD material opacity for smooth alpha blending at LOD boundaries.
-   * Chunks near a LOD boundary get faded opacity to prevent hard pop-in.
+   * Per-instance alpha blending at LOD boundaries.
+   * Each chunk gets its own alpha based on its distance to LOD boundary,
+   * applied via BatchedMesh.setColorAt(instanceId, Vector4) per RENDERING.md spec.
    */
   private updateLODAlpha(cameraCx: number, cameraCy: number): void {
-    // Track min alpha needed per LOD (chunks closest to boundary)
-    const lodMinAlpha: Record<LODLevel, number> = { 0: 1, 1: 1, 2: 1, 3: 1 };
-    let hasTransition = false;
-
     for (const [key, entry] of this.loadedChunks) {
       const coords = parseKeyFast(key);
       const dist = Math.max(
@@ -493,33 +549,29 @@ export class ChunkLoader {
         Math.abs(coords.cy - cameraCy),
       );
 
+      let alpha = 1.0;
+
       // Check distance to the nearest LOD boundary
       for (const boundary of LOD_BOUNDARIES) {
         const distToBoundary = Math.abs(dist - boundary);
         if (distToBoundary < LOD_BLEND_CHUNKS) {
-          // In transition zone — compute fade factor
+          // In transition zone — compute per-chunk fade factor
           const t = distToBoundary / LOD_BLEND_CHUNKS;
-          // Chunks just past the boundary (higher LOD) fade in, chunks just before fade out
-          const alpha = dist > boundary
+          alpha = dist > boundary
             ? t           // fading in (just entered this LOD)
             : 1 - t;      // fading out (about to leave this LOD)
-          lodMinAlpha[entry.lod] = Math.min(lodMinAlpha[entry.lod], alpha);
-          hasTransition = true;
+          alpha = Math.max(0.05, alpha); // never fully invisible
           break;
         }
       }
-    }
 
-    // Apply opacity to LOD materials
-    for (const lod of [0, 1, 2, 3] as LODLevel[]) {
-      const mat = this.lodMaterials.get(lod);
-      if (!mat) continue;
-      // Smooth alpha: min 0.3 to avoid fully invisible chunks during transition
-      const targetAlpha = hasTransition ? Math.max(0.3, lodMinAlpha[lod]) : 1.0;
-      mat.opacity = mat.opacity + (targetAlpha - mat.opacity) * 0.15;
-      // Disable transparency when fully opaque for better performance
-      mat.transparent = mat.opacity < 0.99;
-      mat.depthWrite = mat.opacity >= 0.5;
+      // Apply per-instance color+alpha via BatchedMesh.setColorAt
+      const bm = this.batchedMeshes.get(entry.lod);
+      if (bm) {
+        this.tmpColorRGBA.a = alpha;
+        // Runtime: setColorAt calls color.toArray(data, offset), our RGBA helper writes 4 components
+        bm.setColorAt(entry.instanceId, this.tmpColorRGBA as unknown as THREE.Color);
+      }
     }
   }
 
@@ -577,6 +629,10 @@ export class ChunkLoader {
       cy * CHUNK_SIZE - MAP_SIZE / 2,
     );
     bm.setMatrixAt(instanceId, this.tmpMatrix);
+
+    // Initialize per-instance color to white with full opacity
+    this.tmpColorRGBA.a = 1;
+    bm.setColorAt(instanceId, this.tmpColorRGBA as unknown as THREE.Color);
 
     // Dispose the temporary geometry (data has been copied into BatchedMesh)
     geometry.dispose();

@@ -32,7 +32,9 @@ vi.mock('three', () => {
     addGeometry: vi.fn().mockReturnValue(0),
     addInstance: vi.fn().mockReturnValue(0),
     setMatrixAt: vi.fn(),
+    setColorAt: vi.fn(),
     deleteGeometry: vi.fn(),
+    deleteInstance: vi.fn(),
     dispose: vi.fn(),
   }));
   return {

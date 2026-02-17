@@ -26,6 +26,11 @@ let cameraHeight = 0;
 let cameraWorldX = 0;
 /** Camera world Z, updated every frame. */
 let cameraWorldZ = 0;
+/** View range in chunks (radius), updated every frame from camera height. */
+let viewRange = 2;
+/** Camera chunk coordinates (grid 0-63), updated every frame. */
+let cameraChunkX = 0;
+let cameraChunkY = 0;
 
 export function getViewport(): Readonly<ViewportRect> {
   return currentViewport;
@@ -41,6 +46,21 @@ export function getCameraWorldX(): number {
 
 export function getCameraWorldZ(): number {
   return cameraWorldZ;
+}
+
+/** View range in chunk units (radius), derived from camera height. */
+export function getViewRange(): number {
+  return viewRange;
+}
+
+/** Camera chunk X coordinate (grid 0-63). */
+export function getCameraChunkX(): number {
+  return cameraChunkX;
+}
+
+/** Camera chunk Y coordinate (grid 0-63). */
+export function getCameraChunkY(): number {
+  return cameraChunkY;
 }
 
 export function viewportSystem(world: World, _delta: number): void {
@@ -62,9 +82,12 @@ export function viewportSystem(world: World, _delta: number): void {
   const centerCx = Math.floor(tileX / CHUNK_SIZE);
   const centerCy = Math.floor(tileZ / CHUNK_SIZE);
 
+  cameraChunkX = centerCx;
+  cameraChunkY = centerCy;
+
   // Estimate visible range from camera height
-  // Higher camera = wider viewport
-  const viewRange = Math.max(2, Math.ceil(camY / 100));
+  // Higher camera = wider viewport, capped to avoid overloading at max zoom-out
+  viewRange = Math.min(20, Math.max(2, Math.ceil(camY / 100)));
 
   const minCx = Math.max(0, centerCx - viewRange);
   const maxCx = Math.min(GRID_CHUNKS - 1, centerCx + viewRange);

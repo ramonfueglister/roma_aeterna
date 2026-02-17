@@ -21,6 +21,8 @@ import {
   getCaravanGeometry,
   disposeAgentModels,
 } from './agentModels';
+import { registerInstancePool, unregisterInstancePool } from '../ecs/meshRegistry';
+import { InstancePool } from '../ecs/enums';
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -28,6 +30,15 @@ const HALF_MAP = MAP_SIZE / 2;
 const WATER_Y = WATER_LEVEL - 1;
 const MAX_VISIBLE_HEIGHT = 2000;
 const CAMERA_MOVE_THRESHOLD = 40;
+
+/** Maps AgentModelType index → InstancePool ID for MeshRegistry. */
+const AGENT_POOL_IDS = [
+  InstancePool.AGENT_TRADER,   // 0 = TRADE_SHIP
+  InstancePool.AGENT_SHIP,     // 1 = FISHING_BOAT
+  InstancePool.AGENT_CITIZEN,  // 2 = CITIZEN
+  InstancePool.AGENT_LEGION,   // 3 = LEGION
+  InstancePool.AGENT_CARAVAN,  // 4 = CARAVAN
+] as const;
 
 // ── Shared Material ─────────────────────────────────────────────
 
@@ -296,6 +307,9 @@ export class AgentRenderer {
       mesh.instanceMatrix.needsUpdate = true;
       this.scene.add(mesh);
       meshRefs[t] = mesh;
+
+      // Register in ECS MeshRegistry
+      registerInstancePool(AGENT_POOL_IDS[t]!, mesh);
     }
 
     this.tradeShipMesh = meshRefs[0] ?? null;
@@ -343,8 +357,10 @@ export class AgentRenderer {
       this.caravanMesh,
     ];
 
-    for (const mesh of meshes) {
+    for (let t = 0; t < meshes.length; t++) {
+      const mesh = meshes[t];
       if (mesh) {
+        unregisterInstancePool(AGENT_POOL_IDS[t]!);
         this.scene.remove(mesh);
         mesh.dispose();
       }

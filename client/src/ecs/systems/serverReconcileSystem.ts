@@ -1,22 +1,34 @@
 /**
  * System #18: ServerReconcileSystem
  *
- * Checks for stale entities (missedPolls >= 3), marks them for removal.
- * Grace period of 3 polls (6 seconds) prevents flicker.
+ * Checks for stale entities (missedPolls >= 3), marks them for removal
+ * by adding the PendingRemoval tag. CleanupSystem processes actual disposal.
+ *
+ * Grace period of 3 polls (6 seconds at 2s agent poll interval) prevents
+ * flicker when entities briefly leave and re-enter the viewport boundary.
  *
  * Frequency: every 5s
  */
 
 import type { World } from 'bitecs';
+import { query, addComponent } from 'bitecs';
+import { ServerSync, PendingRemoval } from '../components';
+
+/** Missed-poll threshold before marking entity for removal. */
+const STALE_THRESHOLD = 3;
 
 let _accumulator = 0;
 
-export function serverReconcileSystem(_world: World, delta: number): void {
+export function serverReconcileSystem(world: World, delta: number): void {
   _accumulator += delta;
   if (_accumulator < 5.0) return;
   _accumulator -= 5.0;
 
-  // Stub: will check missedPolls >= 3, mark entities for despawn.
-  // CleanupSystem processes the actual removal.
-  // Implementation in Phase 2 (data layer).
+  const eids = query(world, [ServerSync]);
+  for (let i = 0; i < eids.length; i++) {
+    const eid = eids[i]!;
+    if (ServerSync.missedPolls[eid]! >= STALE_THRESHOLD) {
+      addComponent(world, eid, PendingRemoval);
+    }
+  }
 }

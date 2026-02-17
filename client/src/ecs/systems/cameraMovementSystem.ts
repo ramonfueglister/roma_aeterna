@@ -1,19 +1,30 @@
 /**
  * System #2: CameraMovementSystem
  *
- * Currently a no-op pass-through. Camera movement is handled by
- * CameraController + OrbitControls (Three.js native). The ECS camera
- * entity's Position/Rotation are set by cameraInputSystem each frame.
+ * Delegates to CameraController.update() which drives OrbitControls,
+ * WASD input, edge scrolling, and zoom animation.
  *
- * This system exists as a placeholder for future ECS-native camera
- * movement (e.g., integrating Velocity components, boundary clamping).
+ * The CameraController remains the authority for actual camera
+ * manipulation. cameraInputSystem (system #1) mirrors the resulting
+ * Three.js camera state back into ECS components each frame.
  *
  * Frequency: every frame
  */
 
 import type { World } from 'bitecs';
+import type { CameraController } from '../../camera/cameraController';
 
-export function cameraMovementSystem(_world: World, _delta: number): void {
-  // CameraController handles all movement. ECS camera entity is
-  // updated by cameraInputSystem. No additional work needed here.
+let controllerRef: CameraController | null = null;
+
+export function setControllerRef(controller: CameraController): void {
+  controllerRef = controller;
+}
+
+export function getControllerRef(): CameraController | null {
+  return controllerRef;
+}
+
+export function cameraMovementSystem(_world: World, delta: number): void {
+  if (!controllerRef) return;
+  controllerRef.update(delta);
 }

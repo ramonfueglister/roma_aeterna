@@ -1,23 +1,19 @@
 /**
  * System #7: ChunkUnloadSystem
  *
- * Currently a no-op. Chunk unloading is handled internally by
- * ChunkLoader.unloadDistantChunks() called from ChunkLoader.update().
+ * Chunk unloading is driven by ChunkLoader.unloadDistantChunks() which fires
+ * the onChunkUnloaded callback. The callback (wired in chunkLoadSystem) calls
+ * removeChunkEntity to destroy the ECS entity and clean up the chunk-to-EID map.
  *
- * This system exists as a placeholder for future ECS-native chunk
- * lifecycle management.
+ * This system remains as an explicit pipeline slot to preserve the system
+ * ordering contract (system #7 runs after #6 chunkMesh).
  *
- * Frequency: every 500ms
+ * Frequency: every frame (no-op; unloading is callback-driven)
  */
 
 import type { World } from 'bitecs';
 
-let _accumulator = 0;
-
-export function chunkUnloadSystem(_world: World, delta: number): void {
-  _accumulator += delta;
-  if (_accumulator < 0.5) return;
-  _accumulator -= 0.5;
-
-  // ChunkLoader.unloadDistantChunks() handles unloading internally.
+export function chunkUnloadSystem(_world: World, _delta: number): void {
+  // Chunk unloading is handled by ChunkLoader.unloadDistantChunks() →
+  // onChunkUnloaded callback → removeChunkEntity() in chunkEntityMap.
 }

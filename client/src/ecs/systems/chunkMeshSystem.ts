@@ -1,19 +1,23 @@
 /**
  * System #6: ChunkMeshSystem
  *
- * Currently a no-op. Mesh creation is handled internally by ChunkLoader
- * (worker results → BatchedMesh.addGeometry()). The chunkLoadSystem
- * delegates to ChunkLoader.update() which drives the full pipeline.
+ * Chunk mesh creation is event-driven: ChunkLoader's async worker pipeline
+ * fires onChunkMeshReady callbacks that write MeshRef components directly
+ * via the hooks set up in chunkLoadSystem.
  *
- * This system exists as a placeholder for future ECS-native chunk
- * mesh management where worker results write directly to ECS components.
+ * This system does not need to poll or queue — the callback-based approach
+ * ensures MeshRef is populated as soon as the mesh is ready, within the
+ * same frame's microtask queue.
  *
- * Frequency: on worker callback (event-driven)
+ * The system remains as an explicit pipeline slot so the system ordering
+ * contract is preserved (system #6 runs after #5 chunkLoad).
+ *
+ * Frequency: every frame (no-op unless future mesh validation is needed)
  */
 
 import type { World } from 'bitecs';
 
 export function chunkMeshSystem(_world: World, _delta: number): void {
-  // ChunkLoader handles mesh creation internally.
-  // Worker results → BatchedMesh.addGeometry() → geometry ID stored in loadedChunks.
+  // Mesh creation is handled by ChunkLoader callbacks → chunkLoadSystem hooks.
+  // MeshRef components are written directly in the onChunkMeshReady callback.
 }

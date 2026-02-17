@@ -29,6 +29,7 @@ export function addChunkArchetype(world: World, eid: number): void {
 
   // Defaults
   MeshRef.geometryId[eid] = -1;
+  MeshRef.instanceId[eid] = -1;
   Visible.value[eid] = 1;
 }
 
@@ -54,6 +55,7 @@ export function addCityArchetype(world: World, eid: number): void {
 
   // Defaults
   MeshRef.geometryId[eid] = -1;
+  MeshRef.instanceId[eid] = -1;
   InstanceRef.instanceId[eid] = -1;
   Visible.value[eid] = 1;
 }
@@ -168,6 +170,7 @@ export function addWaterArchetype(world: World, eid: number): void {
   addComponent(world, eid, Visible);
 
   MeshRef.geometryId[eid] = -1;
+  MeshRef.instanceId[eid] = -1;
   Visible.value[eid] = 1;
 }
 

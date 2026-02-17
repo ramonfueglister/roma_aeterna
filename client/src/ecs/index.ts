@@ -1,8 +1,8 @@
 /**
  * ECS public API.
  *
- * Re-exports the pieces needed by the Engine and existing GameSystems
- * during the migration period.
+ * Re-exports the pieces needed by the Engine and bootstrap code.
+ * The ECS pipeline is the sole update path — no GameSystem loop.
  */
 
 export { world, MAX_ENTITIES } from './world';
@@ -18,6 +18,7 @@ export {
   ServerSync, Visible,
   IsChunk, IsCity, IsAgent, IsTree,
   IsProvince, IsResource, IsCamera, IsWater, IsLabel,
+  PendingRemoval,
 } from './components';
 
 // Archetypes
@@ -37,6 +38,13 @@ export {
   hasServerEntity, serverEntityCount, forEachServerEntity,
 } from './serverEntityMap';
 
+// Chunk entity map
+export {
+  getChunkEid, setChunkEid, hasChunkEntity,
+  removeChunkEntity, removeChunkEntityByEid,
+  clearChunkEntityMap, chunkEntityCount,
+} from './chunkEntityMap';
+
 // Enums
 export {
   BiomeType, Culture, AgentType, AgentRoleType, AgentState,
@@ -52,12 +60,19 @@ export {
   clearMeshRegistry,
 } from './meshRegistry';
 
-// System configuration setters (called by Engine during init)
+// System configuration setters (called during bootstrap in main.ts)
 export { setCameraRef } from './systems/cameraInputSystem';
+export { setControllerRef, getControllerRef } from './systems/cameraMovementSystem';
 export { setChunkLoaderRef, getChunkLoaderRef } from './systems/chunkLoadSystem';
 export { setCityRendererRef } from './systems/cityLODSystem';
 export { setTreeRendererRef } from './systems/treeRenderSystem';
 export { setAgentRendererRef } from './systems/agentRenderSystem';
 export { setLabelRendererRef } from './systems/labelSystem';
 export { setProvinceRendererRef } from './systems/provinceOverlaySystem';
-export { getViewport, getCameraHeight, getCameraWorldX, getCameraWorldZ } from './systems/viewportSystem';
+export { setWaterRendererRef } from './systems/waterRenderSystem';
+export { setRoadRendererRef } from './systems/roadRenderSystem';
+export { setParticleSystemRef } from './systems/particleRenderSystem';
+export { setPostProcessingRef } from './systems/postProcessingRenderSystem';
+export { setHudRef, setToast } from './systems/hudSystem';
+export type { HudElements } from './systems/hudSystem';
+export { getViewport, getCameraHeight, getCameraWorldX, getCameraWorldZ, getViewRange, getCameraChunkX, getCameraChunkY } from './systems/viewportSystem';

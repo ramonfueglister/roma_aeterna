@@ -1,18 +1,21 @@
 /**
- * Engine: Central game loop and subsystem manager.
+ * Engine: Central game loop and rendering infrastructure.
  *
- * Each subsystem implements the GameSystem interface and is registered
- * via engine.register(). The engine owns the Three.js renderer, scene,
- * camera, and the render loop. Subsystems receive init/update/dispose
- * calls in registration order.
+ * Owns the Three.js renderer, scene, camera, and the frame loop.
+ * The ECS pipeline (runPipeline) is the SOLE update path — all game
+ * logic runs through ECS systems. No GameSystem class hierarchy.
+ *
+ * Renderer creation and ECS ref wiring happen in main.ts during
+ * bootstrap. The Engine handles only:
+ *   - Scene, camera, renderer setup
+ *   - Lighting (ambient + directional sun with contact shadows)
+ *   - The frame loop (requestAnimationFrame)
+ *   - Window resize propagation
+ *   - Dispose callback management
  *
  * Uses WebGPURenderer which supports both native WebGPU and WebGL2
  * (via forceWebGL fallback). TSL node materials compile to GLSL or WGSL
  * automatically depending on the active backend.
- *
- * The ECS pipeline runs first each frame (via runPipeline), then
- * GameSystems update. During migration, both coexist. Once all
- * GameSystems are migrated, only the ECS pipeline will remain.
  */
 
 import * as THREE from 'three';
@@ -23,30 +26,6 @@ import { createLogger } from '../core/logger';
 import { world, runPipeline } from '../ecs';
 
 const log = createLogger('Engine');
-
-// ── Subsystem Interface ───────────────────────────────────────────
-
-export interface GameSystem {
-  /** Unique name for logging and lookup. */
-  readonly name: string;
-
-  /**
-   * Called once after the engine is fully constructed.
-   * Receives the engine so subsystems can access scene, camera, renderer.
-   */
-  init(engine: Engine): void;
-
-  /**
-   * Called every frame. deltaTime is in seconds, elapsed is total seconds.
-   */
-  update(deltaTime: number, elapsed: number): void;
-
-  /** Called on window resize. */
-  resize?(width: number, height: number): void;
-
-  /** Clean up GPU resources, event listeners, etc. */
-  dispose(): void;
-}
 
 // ── Engine ────────────────────────────────────────────────────────
 
@@ -59,12 +38,13 @@ export class Engine {
   /** DOM element the renderer canvas lives in. */
   readonly container: HTMLDivElement;
 
-  /** Directional sun light (public for shadow target updates). */
+  /** Directional sun light (contact shadows at close zoom). */
   private sun!: THREE.DirectionalLight;
 
-  private systems: GameSystem[] = [];
   private running = false;
   private animationFrameId = 0;
+  private disposeCallbacks: (() => void)[] = [];
+  private resizeCallbacks: ((width: number, height: number) => void)[] = [];
 
   constructor(mountPoint: HTMLElement) {
     // Canvas container
@@ -124,7 +104,7 @@ export class Engine {
     this.scene.add(sun.target);
 
     // Resize
-    window.addEventListener('resize', this.onResize);
+    window.addEventListener('resize', this.handleResize);
 
     const backend = navigator.gpu ? 'WebGPU' : 'WebGL2';
     log.info(`${APP_NAME} engine created (${backend} backend)`);
@@ -139,18 +119,16 @@ export class Engine {
     log.info('Renderer initialized');
   }
 
-  // ── Subsystem Management ──────────────────────────────────────
+  // ── Lifecycle Callbacks ─────────────────────────────────────────
 
-  /** Register a subsystem. Call before start(). */
-  register(system: GameSystem): void {
-    this.systems.push(system);
-    system.init(this);
-    log.info(`System registered: ${system.name}`);
+  /** Register a callback to run on engine dispose. */
+  onDispose(fn: () => void): void {
+    this.disposeCallbacks.push(fn);
   }
 
-  /** Get a registered system by name. */
-  getSystem<T extends GameSystem>(name: string): T | undefined {
-    return this.systems.find((s) => s.name === name) as T | undefined;
+  /** Register a callback to run on window resize. */
+  onResize(fn: (width: number, height: number) => void): void {
+    this.resizeCallbacks.push(fn);
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────
@@ -169,12 +147,13 @@ export class Engine {
     this.running = false;
     cancelAnimationFrame(this.animationFrameId);
 
-    for (const system of this.systems) {
-      system.dispose();
+    for (const fn of this.disposeCallbacks) {
+      fn();
     }
-    this.systems = [];
+    this.disposeCallbacks = [];
+    this.resizeCallbacks = [];
 
-    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('resize', this.handleResize);
     this.renderer.dispose();
     log.info('Engine stopped');
   }
@@ -188,10 +167,8 @@ export class Engine {
     perfMonitor.beginFrame();
 
     const deltaTime = this.clock.getDelta();
-    const elapsed = this.clock.getElapsedTime();
 
     // Contact shadows: only at close zoom (< 500) per spec section 22
-    // Provides grounding shadows for entities, fades out by height 500
     const camPos = this.camera.position;
     const shadowsNeeded = camPos.y < 500;
     if (this.sun.castShadow !== shadowsNeeded) {
@@ -203,13 +180,8 @@ export class Engine {
       this.sun.target.updateMatrixWorld();
     }
 
-    // Run ECS pipeline first (camera sync, viewport, visibility, etc.)
+    // ECS pipeline is the sole update path
     runPipeline(world, deltaTime);
-
-    // Then run GameSystems (renderers that still own their logic)
-    for (const system of this.systems) {
-      system.update(deltaTime, elapsed);
-    }
 
     perfMonitor.drawCalls = this.renderer.info.render.calls;
     perfMonitor.triangles = this.renderer.info.render.triangles;
@@ -218,15 +190,15 @@ export class Engine {
 
   // ── Resize ────────────────────────────────────────────────────
 
-  private onResize = (): void => {
+  private handleResize = (): void => {
     const w = window.innerWidth;
     const h = window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
 
-    for (const system of this.systems) {
-      system.resize?.(w, h);
+    for (const fn of this.resizeCallbacks) {
+      fn(w, h);
     }
   };
 }

@@ -61,6 +61,7 @@ export const LODLevel = {
 export const MeshRef = {
   batchId: new Uint16Array(N),
   geometryId: new Int32Array(N),
+  instanceId: new Int32Array(N),
 };
 
 /**
@@ -99,12 +100,14 @@ export const AgentRole = {
   state: new Uint8Array(N),
 };
 
-/** Agent movement interpolation between server ticks. */
+/** Agent movement interpolation between server ticks.
+ *  prevX/nextX = east-west (world X), prevZ/nextZ = north-south (world Z).
+ *  Y (terrain height) is sampled separately, not interpolated here. */
 export const AgentMovement = {
   prevX: new Float32Array(N),
-  prevY: new Float32Array(N),
+  prevZ: new Float32Array(N),
   nextX: new Float32Array(N),
-  nextY: new Float32Array(N),
+  nextZ: new Float32Array(N),
   interpT: new Float32Array(N),
   speed: new Float32Array(N),
   heading: new Float32Array(N),
@@ -158,3 +161,4 @@ export const IsResource = {};
 export const IsCamera = {};
 export const IsWater = {};
 export const IsLabel = {};
+export const PendingRemoval = {};
