@@ -404,6 +404,31 @@ setInterval(async () => {
 }, 2000)
 ```
 
+### Client-Side ECS Entity Hydration
+
+All server data is hydrated into bitECS entities on the client (see `docs/ECS.md` Section 6). The hydration layer maps database rows to ECS components via a UUID→EID bidirectional map.
+
+**Row-to-Entity Mapping:**
+
+| Table | Hydration Timing | ECS Archetype | Key Components |
+|-------|-----------------|---------------|----------------|
+| `cities` | Startup (one-time) | City entity | Position, CityInfo, CityDisplay, LODLevel, MeshRef, ServerSync |
+| `provinces` | Startup (one-time) | Province entity | ProvinceTag, Position (label_point), Visible |
+| `agents` (via RPC) | Every 2s (viewport poll) | Agent entity | Position, AgentRole, AgentMovement, InstanceRef, ServerSync |
+| `chunks` | On-demand (viewport) | Chunk entity | ChunkCoord, LODLevel, MeshRef, Visible |
+| `resources` | On-demand (viewport) | Resource entity | Position, ResourceSite, InstanceRef, ServerSync |
+
+**UUID-to-EID Mapping:**
+- Server entities have UUIDs (from `uuid_generate_v4()`). ECS entities have numeric EIDs.
+- A `Map<string, number>` (uuid→eid) and `Map<number, string>` (eid→uuid) maintain the bridge.
+- On poll response: if UUID not in map → `addEntity()` + archetype; if UUID exists → update components in place.
+
+**Reconciliation Cycle:**
+- `ServerReconcileSystem` runs every 5s, checks `ServerSync.missedPolls` on all synced entities.
+- Agents with `missedPolls >= 3` (6s grace period) are removed — they left the viewport or despawned server-side.
+- Cities and provinces are never reconciled (static metadata, loaded once at startup).
+- Chunks are reconciled by the `ChunkUnloadSystem` based on viewport distance, not server polls.
+
 ---
 
 ## 6. Row Level Security (RLS)

@@ -295,6 +295,21 @@ Scheidel (2007) "Roman Population Size". Values are estimates for relative city 
 - Color by province or culture
 - City name label (troika-three-text, major cities only)
 
+### City Entity Archetype (ECS)
+
+Each city is an ECS entity with these components (see `docs/ECS.md` Section 4):
+
+```
+IsCity + Position + CityInfo + CityDisplay + LODLevel + MeshRef + InstanceRef + Visible + ServerSync
+```
+
+The `CityLODSystem` reads the camera distance and writes to `CityDisplay.lodMode`:
+- `lodMode=0` (icon): `InstanceRef` points to the city icon pool, `MeshRef.geometryId = -1`
+- `lodMode=1` (cluster): `MeshRef` points to cluster geometry in a BatchedMesh, `InstanceRef.instanceId = -1`
+- `lodMode=2` (detail): `MeshRef` points to full voxel city geometry, `InstanceRef.instanceId = -1`
+
+`LODLevel.current` drives the terrain LOD around the city. LOD transitions use `LODLevel.blendAlpha` for smooth fading.
+
 ### LOD1 - Cluster (tactical zoom, height 300-1000)
 
 - Simplified 3D silhouette: city walls + top 3 landmark outlines
@@ -374,6 +389,17 @@ Each interactive/service building must expose a runtime visual state in detail v
 
 - State transitions must be deterministic from simulation values.
 - State cues remain visible in all quality profiles (density may be reduced).
+
+### Building State Component (ECS)
+
+Building runtime states from the `building_runtime` table are mapped to ECS when a city enters detail view:
+
+| Table Column | ECS Mapping |
+|-------------|-------------|
+| `state` (supplied/low_supply/unsupplied/needs_repair/upgrading) | Visual cue selection in `CityMeshSystem` |
+| `supply_level`, `condition_level`, `service_level` | Drive prop density and walker behavior weights |
+
+Building state entities are created on-demand when a city's `CityDisplay.lodMode` transitions to detail (2) and destroyed when it transitions back. This avoids holding state for 300+ cities when only ~30 are cached at detail level.
 
 ### Street Interaction Nodes (Mandatory)
 

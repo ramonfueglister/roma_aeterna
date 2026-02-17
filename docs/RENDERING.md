@@ -133,6 +133,20 @@ Worker to Main thread:
 - Zero-copy: no memory duplication, no GC pressure.
 - Critical for 60fps: copying 100KB per chunk would cause frame drops.
 
+### ECS Integration
+
+Workers receive TypedArrays extracted from ECS component stores. The `ChunkLoadSystem` reads `ChunkCoord` and `LODLevel` components to determine what to send. On worker completion, the `ChunkMeshSystem` writes the returned geometry index into the entity's `MeshRef.geometryId` component. The entity ID (`eid`) is passed through the worker message for callback routing.
+
+```
+ChunkLoadSystem → extract ChunkCoord/LODLevel from entity
+  → decode binary → transfer TypedArrays to worker
+  → worker returns mesh data
+ChunkMeshSystem → create BufferGeometry → BatchedMesh.addGeometry()
+  → store index in MeshRef.geometryId[eid]
+```
+
+Workers never access the ECS world directly. They remain pure ArrayBuffer-in, ArrayBuffer-out processors.
+
 ---
 
 ## 4. Chunk Border Handling
@@ -164,6 +178,21 @@ Worker to Main thread:
 - Only Transform-Matrix per instance (16 floats = 64 bytes).
 - Result: 1 draw call for 10,000 trees.
 - Use for: trees, resource icons, city icons, ships, people, sheep.
+
+### ECS Component Mapping
+
+Each entity type maps to specific mesh management through ECS components:
+
+| Component | Three.js Target | Entity Types |
+|-----------|----------------|-------------|
+| `MeshRef.batchId` + `MeshRef.geometryId` | `BatchedMesh` (by LOD level) | Chunks, city detail meshes |
+| `InstanceRef.poolId` + `InstanceRef.instanceId` | `InstancedMesh` (by pool) | Trees, agents, city icons, ships, resource icons |
+
+A `MeshRegistry` (outside ECS) maps integer IDs to Three.js objects:
+- `batchId` → `BatchedMesh` instance (0=LOD0, 1=LOD1, 2=LOD2, 3=LOD3)
+- `poolId` → `InstancedMesh` pool (trees, ships, citizens, traders, legions, etc.)
+
+Systems read indices from components and use the registry to perform Three.js operations (add/remove geometry, update instance matrices). No Three.js objects are stored in ECS components.
 
 ### Draw Call Budget Per Zoom Level
 
@@ -564,6 +593,34 @@ client/
     │   ├── WorkerPool.ts          # 4-worker pool with task queue
     │   ├── meshWorker.ts          # Worker entry: greedy meshing
     │   └── cityWorker.ts          # Worker entry: city generation
+    │
+    ├── ecs/
+    │   ├── world.ts                   # createWorld(), world config
+    │   ├── components.ts              # All SoA component definitions
+    │   ├── archetypes.ts              # Entity archetype factories
+    │   ├── serverEntityMap.ts         # UUID ↔ EID bidirectional map
+    │   ├── pipeline.ts                # System composition and execution order
+    │   ├── enums.ts                   # AgentType, Culture, HarvestState enums
+    │   └── systems/
+    │       ├── cameraInputSystem.ts
+    │       ├── cameraMovementSystem.ts
+    │       ├── viewportSystem.ts
+    │       ├── chunkLODSystem.ts
+    │       ├── chunkLoadSystem.ts
+    │       ├── chunkMeshSystem.ts
+    │       ├── chunkUnloadSystem.ts
+    │       ├── cityLODSystem.ts
+    │       ├── cityMeshSystem.ts
+    │       ├── agentSyncSystem.ts
+    │       ├── agentInterpolationSystem.ts
+    │       ├── agentRenderSystem.ts
+    │       ├── treeRenderSystem.ts
+    │       ├── resourceStateSystem.ts
+    │       ├── visibilitySystem.ts
+    │       ├── labelSystem.ts
+    │       ├── provinceOverlaySystem.ts
+    │       ├── serverReconcileSystem.ts
+    │       └── cleanupSystem.ts
     │
     └── utils/
         ├── ObjectPool.ts          # Generic typed object pool

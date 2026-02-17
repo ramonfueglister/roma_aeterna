@@ -123,6 +123,23 @@ pleiades-places-latest.csv.gz download
   -> Seed: INSERT INTO cities table (Supabase)
 ```
 
+### Pipeline Output → ECS Component Mapping
+
+At client startup, city rows are hydrated into ECS entities (see `docs/ECS.md` Section 6). The pipeline output fields map directly to ECS component fields:
+
+| Pipeline Output / DB Column | ECS Component.Field | Type |
+|----------------------------|--------------------|----|
+| `tile_x`, `tile_y` | `Position.x`, `Position.y` | f32 |
+| `size` (metropolis/large/medium/small/village) | `CityInfo.tier` (1-4) | ui8 |
+| `population` | `CityInfo.population` | ui32 |
+| `province_number` | `CityInfo.provinceNumber` | ui8 |
+| `culture` | `CityInfo.culture` (enum) | ui8 |
+| `is_harbor` | `CityInfo.isHarbor` | ui8 (0/1) |
+| `is_capital` | `CityInfo.isCapital` | ui8 (0/1) |
+| `id` (uuid) | UUID→EID map key | — |
+
+String fields (`name`, `ancient_name`, `accuracy_tier`, `source_refs`, `features`, `buildings`) are not stored in ECS components (no strings in SoA TypedArrays). They remain accessible via the UUID→EID map when the UI info panel needs them.
+
 ---
 
 ## 3. Provinces (41)

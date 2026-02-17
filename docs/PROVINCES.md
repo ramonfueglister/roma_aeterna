@@ -124,6 +124,24 @@ Key properties:
 - Only visible at strategic zoom (camera height > 1000).
 - Implemented as a single mesh with vertex colors per province.
 
+### ECS Dual Storage
+
+Province data lives in two complementary locations:
+
+1. **Per-tile Province-ID**: Baked into each chunk's binary data (1,024 bytes per chunk). Used by the mesh generation worker for vertex color desaturation (empire border fog) and by the JFA distance field pipeline. This is raw tile-level data, not ECS.
+
+2. **Province metadata entities**: Each of the 42 provinces (41 + barbarian) is an ECS entity (see `docs/ECS.md` Section 4):
+
+```
+IsProvince + ProvinceTag + Position + Visible
+```
+
+- `ProvinceTag.number` (1-41) matches the uint8 Province-ID in chunk binary data.
+- `Position` stores the `label_point` from the `provinces` table (used for name label placement).
+- `Visible` is toggled by the `ProvinceOverlaySystem` based on camera height thresholds.
+
+The `ProvinceOverlaySystem` reads `ProvinceTag` and camera height to toggle province fill/border/name rendering. Province entities are hydrated once at startup from the `provinces` table and never reconciled (static metadata).
+
 ---
 
 ## 4. SDF Text Labels

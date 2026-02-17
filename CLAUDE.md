@@ -13,6 +13,7 @@ NOT a smooth terrain game - everything is blocky voxels. The world runs 24/7 wit
 - **Backend**: Supabase (PostgreSQL + PostGIS + Realtime + Rust Simulation Service + Storage + Auth)
 - **Data Pipeline**: Python (GDAL, numpy, GeoPandas, rasterio) -- including binary chunk generation
 - **Mesh Caching**: idb-keyval (IndexedDB)
+- **ECS**: bitECS v0.4.x (SoA entity component system, client-side cache)
 - **AI Agents**: Rust simulation worker (rule-based + optional LLM only outside tick loop)
 
 ## Architecture
@@ -64,6 +65,14 @@ NOT a smooth terrain game - everything is blocky voxels. The world runs 24/7 wit
 - 4 Web Workers for mesh generation
 - Transferable ArrayBuffers (zero-copy)
 - Worker pool with task queue
+
+### ECS Layer (bitECS)
+- All game objects are ECS entities: chunks, cities, agents, trees, provinces, resources
+- Components are SoA TypedArrays (Position.x[eid], CityInfo.tier[eid], etc.)
+- 19 systems run each frame in fixed order: input → viewport → chunk management → city LOD → agent sync/interpolation/render → visibility → labels → cleanup
+- Server sync: Supabase → entity hydration (UUID↔EID mapping) → ECS components → Three.js view
+- Workers receive raw TypedArrays extracted from ECS component stores
+- EventBus retained for UI events only; ECS enter/exit queries replace chunk/agent lifecycle events
 
 ### Performance Targets
 - 60fps on Intel UHD 630 at 1080p
@@ -131,6 +140,7 @@ make clean            # Remove build artifacts
 | `docs/RENDERING.md` | Rendering pipeline details |
 | `docs/RESOURCES.md` | Resources and trade routes |
 | `docs/PROVINCES.md` | Province system |
+| `docs/ECS.md` | Entity Component System architecture |
 
 ## Rules
 
@@ -152,3 +162,9 @@ make clean            # Remove build artifacts
 - Height values 0-127 valid, 128-255 reserved
 - Agent pathfinding: pre-computed city-to-city navigation graph (not raw A* on 2048x2048)
 - Text labels: troika-three-text (SDF rendering, no build-time atlas generation needed)
+- All game objects MUST be ECS entities (chunks, cities, agents, trees, provinces, resources)
+- Components are data-only SoA TypedArrays — no Three.js objects in components
+- Mesh references use integer indices (MeshRef.geometryId, InstanceRef.instanceId), not object refs
+- Systems are stateless functions — all state lives in components
+- Supabase is authoritative; ECS is a client-side cache reflecting server state
+- Workers receive/return raw TypedArrays, never ECS world references

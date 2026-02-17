@@ -65,6 +65,25 @@ work cycle so harvesting is visible directly on the map.
 | haul | Output leaves site via cart/porter/boat | 5-12s |
 | recover | Site resets (partial depletion/rebuild cues) | 4-10s |
 
+### Resource Site Entity Archetype (ECS)
+
+Each visible resource site is an ECS entity (see `docs/ECS.md` Section 4):
+
+```
+IsResource + Position + ResourceSite + InstanceRef + Visible + ServerSync
+```
+
+The `ResourceSite` component drives the harvest state machine:
+
+| Component Field | Type | Maps From |
+|----------------|------|-----------|
+| `ResourceSite.resourceType` | uint8 (0-23) | `resources.type` enum |
+| `ResourceSite.harvestState` | uint8 | 0=idle, 1=work, 2=haul, 3=recover |
+| `ResourceSite.stateTimer` | f32 | Seconds remaining in current state |
+| `ResourceSite.fieldSizeX/Y` | uint8 | `resources.field_size_x/y` |
+
+The `ResourceStateSystem` advances `stateTimer` each frame and transitions between harvest states deterministically. `InstanceRef` maps to the resource icon InstancedMesh pool. Position comes from the `resources.tile_x/tile_y` columns.
+
 ### Site-Specific Harvest Cues
 
 - Grain/Vine/Olive: moving workers, row-by-row cut/uncut pattern, visible bundles.

@@ -257,6 +257,8 @@ Snow-covered:    Height 111-127 (Alpine peaks)
 }
 ```
 
+Workers receive raw TypedArrays extracted from ECS component stores (see `docs/ECS.md`). The `ChunkLoadSystem` reads `ChunkCoord` and `LODLevel` components, decodes binary chunk data, and transfers the resulting TypedArrays to the worker pool. On completion, the `ChunkMeshSystem` writes the returned geometry index into the entity's `MeshRef` component. Workers never access the ECS world directly.
+
 ---
 
 ## 7. Performance Strategy (10 Core Strategies)
@@ -271,6 +273,7 @@ Snow-covered:    Height 111-127 (Alpine peaks)
 8. **IndexedDB Caching**: Generated meshes serialized and cached via idb-keyval
 9. **Deferred Loading**: LOD3 loads instantly, then progressively upgrades to higher detail
 10. **Troika Text Cache**: One bundled font file ("Cinzel") + runtime glyph atlas for all labels
+11. **SoA ECS Iteration**: bitECS SoA TypedArrays enable cache-friendly iteration over component data (~335K ops/s). Systems process contiguous memory blocks instead of scattered object graphs. Agent interpolation, visibility culling, and chunk LOD updates all benefit from sequential array access patterns.
 
 ---
 
@@ -628,6 +631,7 @@ Detail view must satisfy the following Caesar-style liveliness constraints:
 | Data Pipeline  | Python                  | 3.11+            |
 | Chunk Gen      | Python + numpy          | (part of data pipeline) |
 | Mesh Cache     | idb-keyval              | latest           |
+| ECS            | bitECS                  | v0.4.x           |
 | Renderer       | WebGPU                  | --              |
 
 ### Python Dependencies
@@ -917,21 +921,24 @@ Layer 6:     solid fill, inset=0, overhang 1 south, color=roof (cornice)
 ```
 1. Initialize Supabase client (VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY)
 2. Auth: anonymous session (required for world read access)
-3. Parallel metadata fetch:
+3. Create ECS world (`createWorld({ maxEntities: 20_000 })`) and camera entity
+4. Parallel metadata fetch:
    - SELECT id,name,ancient_name,culture,size,tile_x,tile_y,province_number,is_harbor,is_capital,accuracy_tier,confidence,source_refs,name_status FROM cities
    - SELECT id,number,name,culture,color,label_point,accuracy_tier,confidence,source_refs,name_status FROM provinces
    - SELECT game_date,season,tick_count,agent_count,player_count FROM world_state WHERE id=1
-4. Subscribe to Realtime channels:
+   - Hydrate city and province entities from metadata (UUID → EID mapping)
+5. Subscribe to Realtime channels:
    - world_events (new events) -- low frequency, broadcast
    - players (other player positions) -- broadcast channel
    - world_state (season/tick changes) -- single row updates
    NOTE: Agent positions are NOT via Realtime (too high frequency).
    Instead, client polls agents in viewport every 2s via RPC.
-5. Load LOD3 chunks for initial viewport:
+6. Load LOD3 chunks for initial viewport:
    - SELECT data FROM chunks WHERE lod=3 AND x BETWEEN ? AND ? AND y BETWEEN ? AND ?
-6. Render initial overview (LOD3 terrain + city icons + province overlay)
-7. Progressive chunk upgrade (LOD2 → LOD1 → LOD0 as user zooms)
-8. On-demand loads:
+   - Create chunk entities with ChunkCoord + LODLevel components
+7. Render initial overview (LOD3 terrain + city icons + province overlay)
+8. Progressive chunk upgrade (LOD2 → LOD1 → LOD0 as user zooms)
+9. On-demand loads:
    - Roads: viewport bbox query + LIMIT/OFFSET pagination (when zoom < 1000)
    - Rivers: viewport bbox query + LIMIT/OFFSET pagination (when zoom < 1500)
    - Resources: viewport bbox query + LIMIT/OFFSET pagination (when zoom < 1200)
@@ -995,6 +1002,16 @@ for (const chunk of data) {
   })
 }
 ```
+
+### Client ECS Architecture
+
+The client uses bitECS v0.4.x as an entity component system layer between Supabase (server-authoritative data) and Three.js (rendering). All game objects — chunks, cities, agents, trees, provinces, resources — are ECS entities with SoA TypedArray components.
+
+**Data flow**: `Supabase (authoritative) → ECS entities (client cache) → Three.js (view)`
+
+19 systems run each frame in fixed order, processing component data through stateless query functions. Components store only primitive numeric data; Three.js objects are referenced by integer indices (`MeshRef.geometryId` → `BatchedMesh`, `InstanceRef.instanceId` → `InstancedMesh`).
+
+See `docs/ECS.md` for complete architecture specification including component definitions, entity archetypes, system execution order, server sync pipeline, and worker integration.
 
 ---
 

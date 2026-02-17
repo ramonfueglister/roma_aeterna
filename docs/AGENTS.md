@@ -56,6 +56,21 @@ Agents move, trade, patrol, and interact without player input. The world is aliv
 
 The row above is the final active world cap after deterministic scaling; seed-band counts are not hard constraints.
 
+### Agent Entity Archetype (ECS)
+
+Every agent on the client is an ECS entity with these components:
+
+```
+IsAgent + Position + Rotation + AgentRole + AgentMovement + InstanceRef + Visible + ServerSync
+```
+
+- `AgentRole.agentType` maps to the Type column (uint8 enum: 0=trader, 1=ship, 2=legion, 3=citizen, 4=caravan, 5=fishing_boat, 6=horse_rider, 7=ox_cart)
+- `AgentRole.role` maps to citizen functional roles (uint8 enum: 0=market_walker, 1=service_walker, 2=faith_walker, 3=maintenance_walker, 4=idle_civilian)
+- `InstanceRef.poolId` maps to the per-type InstancedMesh pool
+- `ServerSync` tracks last server tick and missed poll count for despawn grace period
+
+See `docs/ECS.md` Section 4 for full archetype definition.
+
 ### Functional Walker Roles (Citizen Subtypes, Mandatory)
 
 Citizen instances are partitioned into deterministic functional roles for Caesar-style street life.
@@ -335,6 +350,18 @@ For each major land route:
 - Distant agents (no player within 500 tiles) → reduce tick rate to 10s
 - Very distant agents (no player within 2000 tiles) → pause, teleport to destination
 
+### Client-Side Entity Lifecycle (ECS)
+
+The `AgentSyncSystem` manages agent entity creation and destruction on the client:
+
+1. **Poll**: Every 2s, calls `agents_near_tile` RPC with camera viewport center and radius.
+2. **Create/Update**: For each row in the response:
+   - If UUID not in entity map → `addEntity()` + add agent archetype components + populate from row data.
+   - If UUID exists → shift current position to `AgentMovement.prevX/Y`, write new position to `AgentMovement.nextX/Y`, reset `interpT` to 0.
+3. **Track**: Mark all received UUIDs. For agent entities NOT in the response, increment `ServerSync.missedPolls`.
+4. **Despawn**: `ServerReconcileSystem` (every 5s) removes entities where `missedPolls >= 3` (grace period of ~6 seconds prevents viewport-boundary flicker).
+5. **Cleanup**: `CleanupSystem` recycles `InstanceRef` slot, removes from UUID↔EID map, calls `removeEntity()`.
+
 ---
 
 ## 7. Client-Side Rendering
@@ -342,6 +369,16 @@ For each major land route:
 ### Agent rendering strategy
 
 Displayed cap is per-frame visible instances; active world simulation can exceed these caps via paging/culling and offscreen parking.
+
+### ECS System Split
+
+Agent rendering is split across three ECS systems (see `docs/ECS.md` Section 5):
+
+| System | Frequency | Responsibility |
+|--------|-----------|---------------|
+| `AgentSyncSystem` | Every 2s | Polls `agents_near_tile` RPC, creates/updates/despawns agent entities, writes to AgentRole + AgentMovement + ServerSync |
+| `AgentInterpolationSystem` | Every frame | Lerps Position between AgentMovement.prevX/Y and nextX/Y, advances interpT, updates Rotation.yaw from movement direction |
+| `AgentRenderSystem` | Every frame | Reads Position + Rotation + InstanceRef, writes transform matrices to InstancedMesh pools |
 
 ```
 Agents use InstancedMesh (1 draw call per agent type):
