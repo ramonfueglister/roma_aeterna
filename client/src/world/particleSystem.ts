@@ -29,7 +29,7 @@ import {
   smoothstep,
   length,
   select,
-  positionLocal,
+  positionGeometry,
   pointUV,
 } from 'three/tsl';
 import { MAP_SIZE, WATER_LEVEL } from '../config';
@@ -184,7 +184,7 @@ export class ParticleSystem {
     // ── Vertex Position Node ──────────────────────────────────
     // Animate position: base + velocity * t, with bird circular orbit
     const positionFn = Fn(() => {
-      const pos = positionLocal.toVar();
+      const pos = positionGeometry.toVar();
       const vel = aVelocity;
       const pType = aType;
       const life = aLife;
@@ -247,7 +247,7 @@ export class ParticleSystem {
       const fadeOut = float(1.0).sub(smoothstep(float(0.75), float(1.0), lifeRatio));
 
       // Distance from camera (XZ plane)
-      const animPos = positionLocal.add(aVelocity.mul(t)).toVar();
+      const animPos = positionGeometry.add(aVelocity.mul(t)).toVar();
       // Add bird orbit offset for correct distance
       const isBird = pType.greaterThan(1.5);
       const birdAngle = uElapsed.mul(0.3).add(life.mul(6.2831));

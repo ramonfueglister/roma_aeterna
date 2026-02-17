@@ -11,7 +11,7 @@ import { Node, MeshPhysicalNodeMaterial } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import {
   uniform, float, vec2, vec3, vec4,
-  positionLocal,
+  positionGeometry,
   sin, cos, mix, pow, max, abs, dot, normalize, reflect,
   smoothstep, fract, floor, clamp,
   texture,
@@ -130,11 +130,11 @@ export class WaterRenderer {
 
     // ---- Vertex position node (wave displacement on Y axis) ----
 
-    const posXZ = positionLocal.xz;
+    const posXZ = positionGeometry.xz;
     const waveH = waveDisplacement(posXZ, uTime);
 
     // Displaced position: add wave height to Y
-    const displacedPosition = positionLocal.add(vec3(0.0, waveH, 0.0));
+    const displacedPosition = positionGeometry.add(vec3(0.0, waveH, 0.0));
 
     // ---- Analytical normal via central difference ----
 
